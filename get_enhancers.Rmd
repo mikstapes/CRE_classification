@@ -1,0 +1,99 @@
+---
+title: "Enhancers filtering"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+Notes to get a final set of HH22 heart enhancers after [CRUP](https://github.com/VerenaHeinrich/CRUP)
+prediction, with inspiration from Tobi
+
+```{r Load pkgs & txdb, results='hide'}
+
+library(here)
+
+bioc_pkg <- c("GenomicFeatures", "rtracklayer", "ChIPpeakAnno")
+tidy_pkg <- c("ggplot2", "tidyr", "dplyr", "readr")
+
+suppressMessages(lapply(bioc_pkg, require, character.only = TRUE)) 
+suppressMessages(lapply(tidy_pkg, require, character.only = TRUE))
+
+#Load pre-generated txdb obj for galGal6, created using ncbi 'all' gene sets to include not-yet curated mef2c
+gg6_txbd <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+  gg6_txbd <- keepStandardChromosomes(gg6_txbd, pruning.mode="coarse")
+
+
+```
+
+## Goal/Approach
+Take ATAC peaks (macs2, no model from BEDPE), overlap with CRUP output (single enhancers), and remove those 1kb *uptream* and 100bp *downstream* of TSS/promoter.
+
+ATAC peaks included in analysis (for now) is _naive_ overlap, i.e. no IDR, between peak sets (BED3) of 2 bio replicates, taken from calling bedtools intersect
+
+`bedtools intersect -a rep1.narrowPeak -b rep2.narrowPeak -wa -f 0.5 > overlap.bed`
+
+>TSS/promoter = +1kb/-200bp region around TSS (start of transcrips from TxDb)
+>Enhancers = ATAC peaks overlapping CRUP enhancers and non-overlapping TSS/promoter 
+
+```{r Get enhancers, warning=FALSE, results='hide'}
+
+# Import data as GRranges obj with rtracklayer
+crup_g <- import.bedGraph(here("bed-infiles", "crup_22h-r1.bedGraph"))
+  names(crup_g) <- paste0("crup_", seq_len(length(crup_g)))
+
+atac_g <- import.bed(here("bed-infiles", "atac_22h_pk.bed"))
+  names(atac_g) <- paste0("atac-pks_", seq_len(length(atac_g)))
+
+# Define TSS/prom
+tss <- GenomicFeatures::promoters(gg6_txbd, upstream = 1000, downstream = 100)
+  tss <- trim(tss)  #trim 6 out of bound tss/promoters
+  
+# Get enhancers
+atac_distal <- atac_g[!overlapsAny(atac_g, tss)]
+enhancers <- atac_distal[overlapsAny(atac_distal, crup_g, maxgap = 200)]
+    
+    # Export distal enhancers as bed file
+    export.bed(enhancers, here("bed-outfiles", "get_enhancers", "HH22h_enhancer_distal.bed"))
+
+```
+
+## Quick stats
+
+```{r Viz-all-thingz, warning=FALSE, results='hide'}
+
+ol_atac <- findOverlapsOfPeaks(atac_g, atac_distal, enhancers, connectedPeaks = "keepAll")
+
+makeVennDiagram(ol_atac, NameOfPeaks = c("ATAC-overlap.2rep", "ATAC.distal", "Enhancers"))
+
+proms <- unique(tss)
+
+ol_enh <- findOverlapsOfPeaks(atac_g, proms, crup_g, connectedPeaks = "keepAll")
+
+```
+
+
+
+
+
+## Other notes
+
+Installation/Loading of ComplexHeatMap depends on pkg Cairo, which requires Xquartz.
+Xquartz was installed with homebrew to fix this:
+`brew install --cask xquartz`
+
+See SOF issue [here](https://stackoverflow.com/questions/38952427/include-cairo-r-on-a-mac)
+
+Initially i wanted to show the relationship between 3 atac peak sets (i.e. all, distal, enhancers) with ComplexHeatmap::UpSet, but it looks like it shows the intersection as the length of ranges in bp(?), and not where each range is one item in the set. Left this out for now. 
+```{r Deprecated-UpSetR, eval=FALSE, message=FALSE, results='hide', warning=FALSE}
+
+latac <- GRangesList(atac=atac_g, distal=atac_distal, enhancers=enhancers)
+latac <- make_comb_mat(latac, mode = 'intersect')
+
+UpSet(latac)
+
+```
+

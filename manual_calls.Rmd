@@ -1,0 +1,594 @@
+---
+title: "Putatative CREs annotation"
+author: "Mikie Phan phan@molgen.mpg.de"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(knitr)
+library(stringr)
+library(ghibli)
+library(ggsci)
+library(cowplot)
+```
+
+# Description
+
+Here I compare epigenome data from mouse (E10.5) and chicken heart (HH22), more specifically I compare manually annotated putative cis-regulatory elements (pCREs)--looking at general stats with regarding to #, locations, and sequence/functional conservation at 2 loci: Hand2, and Nkx2-5.
+
+Load, tidy, and shape data for manual annotation before exporting overall stats.
+
+```{r FUNCTIONS DEF}
+
+# 1. Split copy/paste regions from chrx:xxx-xxx to bed-type format by splitting strings by ':' OR "-"
+
+split_regions <- function(x) {
+  x <- x %>% tidyr::separate(position, 
+                             into=c("chroms", "start", "end"),
+                             sep=":|-")
+  return(x)
+}
+
+get_annotations <- function(x) {
+  x <- x %>% mutate(
+  ann = case_when (
+      atac==TRUE & k27ac== TRUE & k4me1==TRUE | atac==TRUE & k27ac==TRUE & k4me1==TRUE & k4me3==TRUE ~ "enhancer",
+      atac==TRUE & k27ac==TRUE & k4me1==FALSE & k4me3==TRUE ~ "promoter",
+      TRUE ~ "enhancer"))
+  
+  x$ann <- as.factor(x$ann)
+  
+  return(x)
+}
+
+read_shared <- function(x) {
+  colnames(x) <- c("chrom", "start", "end", "name", "ann")
+  x <- dplyr::distinct(x, name)
+  x <- x %>% mutate(tissue_specificity="shared") %>% select(name, tissue_specificity)
+  
+  return(x)
+  
+}
+
+read_aln <- function(x) {
+  colnames(x) <- c("chrom_aln", "start_aln", "end_aln", "name")
+  x <- x %>% mutate(seq_homology="alignable") %>% 
+             select(name, seq_homology, chrom_aln, start_aln, end_aln)
+  return(x)
+}
+
+# mouse$tissue_specificity[is.na(mouse$tissue_specificity)] <- "heart"
+get_tissue_specs <- function(x) {
+  x$tissue_specificity[is.na(x$tissue_specificity)] <- "heart"
+  return(x)
+}
+
+get_homo_seq <- function(x) {
+  x$seq_homology[is.na(x$seq_homology)] <- "unalignable"
+  return(x)
+}
+
+```
+
+```{r Load data, echo=FALSE, message=FALSE}
+#Raw data are manually annotated CREs from mapped bws 
+
+datafiles <- list.files("./bed-infiles", pattern=".tsv")
+datafiles <- gsub(pattern = '\\.tsv$', '', datafiles)
+
+for (i in datafiles) {
+  assign(i, read_tsv(paste0("./bed-infiles/", i, ".tsv")))
+}
+
+# Put annotated data in a list
+
+loci_list <- list(m.hd2=mm10_hand2, 
+                 m.n25=mm10_nkx25, 
+                 g.hd2=gg6_hand2, 
+                 g.n25=gg6_nkx25)
+
+
+#Load limb/heart shared cres
+
+mm_shared <- read_tsv("./bed-infiles/mm_mAnns_shared.bed", col_names = FALSE)
+mm_shared <- read_shared(mm_shared)
+
+gg_shared <- read_tsv("./bed-infiles/gg_mAnns_shared.bed", col_names = FALSE)
+gg_shared <- read_shared(gg_shared)
+
+#Load reciprocal chain alignment
+
+mm_aln <- read_tsv("./bed-infiles/mm_pCREs_Sproj.bed", col_names = FALSE)
+mm_aln <- read_aln(mm_aln)
+
+gg_aln <- read_tsv("./bed-infiles/gg_pCREs_Sproj.bed", col_names = FALSE)
+gg_aln <- read_aln(gg_aln)
+
+
+read_aln <- function(x) {
+  colnames(x) <- c("chrom_aln", "start_aln", "end_aln", "name")
+  x <- x %>% mutate(seq_homology="alignable") %>% 
+             select(name, seq_homology, chrom_aln, start_aln, end_aln)
+  return(x)
+}
+
+gg_func_aln <- read_tsv("./bed-infiles/gg_pCRE_SFproj.bed", col_names = FALSE)
+gg_func_aln <- gg_func_aln %>% select(X4, X5)
+colnames(gg_func_aln) <- c("name", "matched-CREs")
+gg_func_aln <- gg_func_aln %>% mutate(homology_class="Seq, functional")
+
+mm_func_aln <- read_tsv("./bed-infiles/mm_pCREs_SFproj.bed", col_names = FALSE)
+mm_func_aln <- mm_func_aln %>% select(X4, X5)
+colnames(mm_func_aln) <- c("name", "matched-CREs")
+mm_func_aln <- mm_func_aln %>% mutate(homology_class="Seq, functional")
+
+```
+
+```{r Apply annotations, echo=FALSE, message=FALSE}
+
+ann_list <- lapply(loci_list, function(x) split_regions(x))
+ann_list <- lapply(ann_list, function(x) get_annotations(x))
+
+#bind mouse $ chick cres into separate dfs
+mouse_cres <- rbind(ann_list$m.hd2[,1:4-9], ann_list$m.n25[,1:4-9])
+chick_cres <- rbind(ann_list$g.hd2[,1:4-9], ann_list$g.n25[,1:4-9])
+
+#- x_shared bed files are overlaps between heart mAnns and ATAC peaks by bedtools
+mouse_cres <- dplyr::left_join(mouse_cres, mm_shared, by="name")
+chick_cres <- dplyr::left_join(chick_cres, gg_shared, by="name")
+
+#- add a col specifying if the cre is heart specific or shared with limb data
+mouse_cres <- get_tissue_specs(mouse_cres)
+chick_cres <- get_tissue_specs(chick_cres)
+
+
+##same thing, but with cres with seq homology (possible chain alignment)
+mouse_cres <- dplyr::left_join(mouse_cres, mm_aln, by="name")
+chick_cres <- dplyr::left_join(chick_cres, gg_aln, by="name")
+
+mouse_cres <- get_homo_seq(mouse_cres)
+chick_cres <- get_homo_seq(chick_cres)
+
+mouse_cres <- mouse_cres %>% mutate(loci=case_when(str_detect(name, 'hd2') ~ "mm_hand2",
+                                                   str_detect(name, 'n25') ~ "mm_nkx2-5"))
+
+chick_cres <- chick_cres %>% mutate(loci=case_when(str_detect(name, 'hd2') ~ "gg_hand2",
+                                                   str_detect(name, 'n25') ~ "gg_nkx2-5"))
+
+```
+
+```{r Write data, echo=FALSE, message=FALSE}
+
+#write mouse annotated CREs to bed5 for IPP
+mouse_cres %>% select(chroms:name) %>% 
+  write_tsv("./bed-outfiles/mm_pCREs_manual.bed", col_names = FALSE)
+chick_cres %>% select(chroms:name) %>% 
+  write_tsv("./bed-outfiles/gg_pCREs_manual.bed", col_names = FALSE)
+
+#write RData file for future use
+#save(mouse_cres, chick_cres, file="CREs.RData")
+
+
+###### Write bed files for browser view, with colors coding ###### 
+mm_bed <- mouse_cres %>% 
+  mutate(score=0, strand=".", tsrt=start, tend=end, 
+         color=case_when(ann== "enhancer" ~ "0,150,0",
+         ann== "promoter" ~ "0,0,150"))
+  
+
+mm_bed %>% 
+  select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+  write_tsv("./bed-outfiles/mm_pCRE_4uscs.bed", col_names = FALSE)
+
+mm_bed %>% filter(tissue_specificity=="heart") %>% 
+  select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+  write_tsv("./bed-outfiles/mm_pCRE_heart_4uscs.bed", col_names = FALSE)
+
+mm_bed %>% filter(seq_homology=="alignable") %>% 
+  select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+  write_tsv("./bed-outfiles/mm_pCRE_aln_4uscs.bed", col_names = FALSE)
+
+
+gg_bed <- chick_cres %>% 
+  mutate(score=0, strand=".", tsrt=start, tend=end, 
+         color=case_when(ann== "enhancer" ~ "0,150,0",
+         ann== "promoter" ~ "0,0,150"))
+
+gg_bed %>% 
+  select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+  write_tsv("./bed-outfiles/gg_pCRE_4uscs.bed", col_names = FALSE)
+
+gg_bed %>% filter(tissue_specificity=="heart") %>% 
+  select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+  write_tsv("./bed-outfiles/gg_pCRE_heart_4uscs.bed", col_names = FALSE)
+
+gg_bed %>% filter(seq_homology=="alignable") %>% 
+  select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+  write_tsv("./bed-outfiles/gg_pCRE_aln_4uscs.bed", col_names = FALSE)
+
+# gg_bed %>% filter(CRE_class=="Sequence-functional") %>% 
+#   select(chroms, start, end, name, score, strand, tsrt, tend, color) %>% 
+#   write_tsv("./bed-outfiles/gg_pCRE_Faln_4uscs.bed", col_names = FALSE)
+
+#-----------------------------------------------------------------------------#
+
+
+```
+
+```{r Plotting things,  echo=FALSE, message=FALSE}
+## merge df for plotting
+
+all.cres <- rbind(mouse_cres, chick_cres)
+
+#### Plot % heart specific peaks at each loci, separated into prom/enhancer
+
+##### All tissues specs and seq aln, both species, all 4 loci #####
+p1.tissue <- ggplot(all.cres, aes(y=ann)) + 
+  geom_bar(aes(fill=tissue_specificity), color="gray", position = position_fill(reverse = TRUE)) + 
+  facet_wrap(~loci) +
+  xlab("Percentage") +
+  theme(legend.position = "top") +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.line.y = element_blank()) +
+  scale_fill_simpsons() +
+  theme_bw()
+
+
+
+p2.aln <- ggplot(all.cres, aes(y=ann)) + 
+  geom_bar(aes(fill=seq_homology), color="gray", position = position_fill(reverse = TRUE)) + 
+  facet_wrap(~loci) +
+  theme(legend.position = "top") +
+  scale_fill_simpsons()
+
+cowplot::plot_grid(p1.tissue, p2.aln, align="v" , axis="lrtb", ncol=1)
+
+#-----------------------------------------------------------------------------#
+
+##### All tissues specs and seq aln, just mouse #####
+
+m.plot1 <- all.cres %>% filter(loci %in% c("mm_hand2", "mm_nkx2-5")) %>% ggplot(aes(y=ann)) + 
+  geom_bar(aes(fill=tissue_specificity), color="gray", position = position_fill(reverse = TRUE)) + 
+  facet_grid(rows = vars(loci)) +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_manual(values=c("#fed439ff", "#1a9993ff")) + 
+  theme(text = element_text(size = 20)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+
+m.plot2 <- all.cres %>% filter(loci %in% c("mm_hand2", "mm_nkx2-5")) %>% ggplot(aes(y=ann)) +
+   geom_bar(aes(fill=seq_homology), color="gray", position = position_fill(reverse = TRUE)) + 
+   facet_grid(rows = vars(loci)) +
+   theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_manual(values=c("#fed439ff", "#1a9993ff")) + 
+  theme(text = element_text(size = 20)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+
+pdf("./plots/mouse_heart_aln.pdf")
+cowplot::plot_grid(m.plot1, m.plot2, align="v" , axis="lrtb", ncol=1)
+dev.off()
+
+#-----------------------------------------------------------------------------#
+
+##### All tissues specs and seq aln, just chick #################
+
+g.plot1 <- all.cres %>% filter(loci %in% c("gg_hand2", "gg_nkx2-5")) %>% ggplot(aes(y=ann)) + 
+  geom_bar(aes(fill=tissue_specificity), color="gray", position = position_fill(reverse = TRUE)) + 
+  facet_grid(rows = vars(loci)) +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_manual(values=c("#fed439ff", "#1a9993ff")) + 
+  theme(text = element_text(size = 20)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+
+g.plot2 <- all.cres %>% filter(loci %in% c("gg_hand2", "gg_nkx2-5")) %>% ggplot(aes(y=ann)) +
+   geom_bar(aes(fill=seq_homology), color="gray", position = position_fill(reverse = TRUE)) + 
+   facet_grid(rows = vars(loci)) +
+   theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_manual(values=c("#fed439ff", "#1a9993ff")) + 
+  theme(text = element_text(size = 20)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank())
+
+pdf("./plots/chick_heart_aln.pdf")
+cowplot::plot_grid(g.plot1, g.plot2, align="v" , axis="lrtb", ncol=1)
+dev.off()
+
+#-----------------------------------------------------------------------------#
+
+
+
+
+```
+
+```{r Summary stats after reciprocal chain aln, echo=FALSE, message=FALSE}
+### Chick cres after chain aln 
+
+chick_cres_2 <- dplyr::left_join(chick_cres, gg_func_aln, by="name")
+
+chick_cres_2 <- chick_cres_2 %>% 
+  mutate(CRE_class=case_when(seq_homology=="alignable" & is.na(`matched-CREs` ) ~ "Sequence-conserved",
+                             seq_homology=="unalignable" & is.na(`matched-CREs`) ~ "Non-conserved",
+                             seq_homology=="alignable" ~ "Sequence-functional"))
+
+chick_cres_2$CRE_class <- factor(chick_cres_2$CRE_class,
+                                 levels = c("Sequence-conserved", "Sequence-functional", "Non-conserved"))
+
+
+
+
+mouse_cres_2 <- left_join(mouse_cres, mm_func_aln, by="name")
+
+mouse_cres_2 <- mouse_cres_2 %>% 
+  mutate(CRE_class=case_when(seq_homology=="alignable" & is.na(`matched-CREs` ) ~ "Sequence-conserved",
+                             seq_homology=="unalignable" & is.na(`matched-CREs`) ~ "Non-conserved",
+                             seq_homology=="alignable" ~ "Sequence-functional"))
+
+
+mouse_cres_2$CRE_class <- factor(mouse_cres_2$CRE_class,
+                                 levels = c("Sequence-conserved", "Sequence-functional", "Non-conserved"))
+
+
+all.cres2 <- rbind(mouse_cres_2, chick_cres_2)
+
+
+######## PLOTTING #######
+pdf("./plots/gg_pCREs_reciprocal_aln_all.pdf", width=15, height=6)
+  chick_cres_2 %>% dplyr::count(loci, CRE_class) %>% 
+  ggplot(aes(x=loci, y=n, fill=CRE_class)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE)) +
+  coord_flip() +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_simpsons() + 
+  theme(text = element_text(size = 30)) +
+  theme(panel.background = element_blank()) +
+  scale_fill_manual(values=c("#fed439ff", "#e6b800", "#8a9197ff")) +
+  theme(legend.position = "bottom") + 
+  theme(panel.spacing = unit(2, "lines")) +
+  theme(legend.title = element_blank())
+  #scale_fill_ghibli_d("MarnieMedium1", direction = -1)
+dev.off()
+
+
+
+
+pdf("./plots/mm_pCREs_reciprocal_aln_all.pdf", width=15, height=6)
+
+mouse_cres_2 %>% dplyr::count(loci, CRE_class) %>% 
+  ggplot(aes(x=loci, y=n, fill=CRE_class)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE)) +
+  coord_flip() +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_simpsons() + 
+  theme(text = element_text(size = 30)) +
+  theme(panel.background = element_blank()) +
+  scale_fill_manual(values=c("#fed439ff", "#e6b800", "#8a9197ff")) +
+  theme(legend.position = "bottom") + 
+  theme(panel.spacing = unit(2, "lines")) +
+  theme(legend.title = element_blank())
+
+dev.off()
+  
+#-----------------------------------------------------------------------------#
+
+
+
+```
+
+
+READ IN IPP PROJECTED CRES
+
+```{r IPP}
+
+mm_IPP_raw <- read_tsv("./bed-infiles/mm_pCREs.proj", col_names = TRUE)
+
+####### REFORMATTING AND TIDY THE OG IPP OUTPUT #######
+
+#Remove the first row
+mm_IPP_raw <- mm_IPP_raw[-1,]
+
+#Select only the relevant cols (i.e. coords, projected coords, and distance score)
+mm_IPP_raw <- mm_IPP_raw %>% select(name=X1, 
+                            ref=coords, 
+                            coords_direct=coords_1,
+                            coords_djikstra=coords_2,
+                            score_direct=score, 
+                            score_djikstra=score_1,
+                            bridging_species)
+
+###### Tidy data, extract the projection type from score ########
+
+### SAVE THIS DF TO RDATA 
+mm_IPP_tidy <- mm_IPP_raw %>% pivot_longer(cols = starts_with("score"), 
+                      names_to = "proj_method", 
+                      names_prefix = "score_", 
+                      values_to = "distance_score")
+
+mm_IPP_tidy %>% write_tsv("./bed-outfiles/mm_pCREs_IPP_tidy_all.bed", col_names = FALSE)
+
+mm_IPP_thresholded <- mm_IPP_tidy %>% 
+  filter(proj_method=="djikstra" & distance_score >=0.97) %>%
+  select(name, coords_djikstra) %>% 
+  left_join(select(mouse_cres, name, ann), by="name") %>% 
+  tidyr::separate(coords_djikstra, into = c("chrom", "center"), sep = ":")
+
+mm_IPP_thresholded$center <- as.numeric(mm_IPP_thresholded$center)
+
+mm_IPP_thresholded <- mm_IPP_thresholded %>% 
+  mutate(offset=200,  
+         start=center-offset, 
+         end=center+offset)
+
+
+#----------------------------------------------------------------------#   
+
+mm_IPP_direct<- mm_IPP_tidy %>% 
+  filter(proj_method=="direct" & distance_score >=0.97) %>%
+  select(name, coords_direct) %>% 
+  left_join(select(mouse_cres, name, ann), by="name") %>% 
+  tidyr::separate(coords_direct, into = c("chrom", "center"), sep = ":")
+
+mm_IPP_direct$center <- as.numeric(mm_IPP_direct$center)
+
+mm_IPP_direct <- mm_IPP_direct  %>% 
+  mutate(offset=200,  
+         start=center-offset, 
+         end=center+offset)
+
+
+
+###### Write to BED + color codes  ######
+mm_IPP_thresholded %>% 
+  select(chrom, start, end, name, ann) %>% 
+  mutate(score=0, strand=".", tsrt=start, tend=end, 
+         color="112,154,225") %>% 
+  select(chrom, start, end, name, score, strand, tsrt, tend, color) %>%
+  write_tsv("./bed-outfiles/mm_pCREs_IPP_proj_97.bed", col_names = FALSE)
+
+mm_IPP_direct %>% 
+  select(chrom, start, end, name, ann) %>% 
+  mutate(score=0, strand=".", tsrt=start, tend=end, 
+         color="254,212,57") %>% 
+  select(chrom, start, end, name, score, strand, tsrt, tend, color) %>%
+  write_tsv("./bed-outfiles/mm_pCREs_direct_proj_97.bed", col_names = FALSE)
+
+#----------------------------------------------------------------------#   
+
+
+
+
+
+####### Merge with annotated pCREs to make a massive master df #######
+
+mm_pCREs_with_IPP <- mouse_cres %>% 
+  select(chroms, start, end, name, ann, tissue_specificity, loci) %>% 
+  left_join(select(mm_IPP_direct, name, center), by="name") %>%
+  mutate(aln=case_when(is.na(center) ~ "unalignable", 
+                       !is.na(center) ~ "alignable")) %>% 
+  select(-center) %>% 
+  left_join(select(mm_IPP_thresholded, name, center), by="name") %>% 
+  mutate(CRE_class=case_when(aln=="alignable" & !is.na(center) ~ "Sequence-conserved",
+                             aln=="unalignable" & !is.na(center) ~ "Functional-conserved",
+                             TRUE ~ "Not-conserved")) %>% 
+  select(-center)
+           
+mm_pCREs_with_IPP$CRE_class <-factor(mm_pCREs_with_IPP$CRE_class, 
+         levels=c("Sequence-conserved", "Functional-conserved", "Not-conserved"))
+
+#---------------------------------------------------------------------------------------#
+
+
+###PLOTTING #######
+
+pdf("./plots/mm_pCREs_IPP_heart.pdf", width=15, height=6)
+
+mm_pCREs_with_IPP %>% dplyr::count(tissue_specificity, loci, CRE_class) %>% 
+  ggplot(aes(x=loci, y=n, fill=CRE_class)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE)) +
+  facet_grid(~tissue_specificity) +
+  coord_flip() +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_simpsons() + 
+  theme(text = element_text(size = 30)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") + 
+  theme(panel.spacing = unit(2, "lines")) +
+  theme(legend.title = element_blank())
+
+dev.off()
+
+pdf("./plots/mm_pCREs_IPP_ann.pdf", width=15, height=6)
+mm_pCREs_with_IPP %>% dplyr::count(ann, loci, CRE_class) %>% 
+  ggplot(aes(x=loci, y=n, fill=CRE_class)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE)) +
+  facet_grid(~ann) +
+  coord_flip() +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_simpsons() + 
+  theme(text = element_text(size = 30)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") + 
+  theme(panel.spacing = unit(2, "lines")) +
+  theme(legend.title = element_blank())
+dev.off()
+
+pdf("./plots/mm_pCREs_IPP_all.pdf", width=15, height=6)
+mm_pCREs_with_IPP %>% dplyr::count(loci, CRE_class) %>% 
+  ggplot(aes(x=loci, y=n, fill=CRE_class)) +
+  geom_bar(stat = "identity", position = position_fill(reverse = TRUE)) +
+  coord_flip() +
+  theme(axis.title.y = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.ticks.y = element_blank()) +
+  theme(axis.ticks.length = unit(0.25, "cm")) +
+  theme(axis.line.x = element_line(color = "black")) +
+  scale_fill_simpsons() + 
+  theme(text = element_text(size = 30)) +
+  theme(panel.background = element_blank()) +
+  theme(legend.position = "bottom") + 
+  theme(panel.spacing = unit(2, "lines")) +
+  theme(legend.title = element_blank())
+dev.off()
+  
+#-----------------------------------------------------------------------#
+
+
+```
+
+
+
+
+```{r TEST THINGZ, eval=FALSE, echo=FALSE}
+#mouse <- dplyr::left_join(mouse_cres, mm_shared, by="name")
+# https://ggplot2.tidyverse.org/reference/geom_bar.html
+# https://exts.ggplot2.tidyverse.org/gallery/ 
+
+
+```
+
+
+
+
