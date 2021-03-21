@@ -1,3 +1,0 @@
-	coords	coords	coords	score	score	ref_anchors	ref_anchors	qry_anchors	qry_anchors	ref_dist_closest_anchor	ref_dist_closest_anchor	qry_dist_closest_anchor	qry_dist_closest_anchor	bridging_species
-	ref	direct	dijkstra	direct	dijkstra	direct	dijkstra	direct	dijkstra	direct	dijkstra	direct	dijkstra	dijkstra
-hd1	chr4:43739670	chr8:56448068	chr8:56448068	0.7918139190189792	0.7918139190189792	('chr4:43729567', 'chr4:43760443')	('chr4:43729567', 'chr4:43760443')	('chr8:56510264', 'chr8:56320187')	('chr8:56510264', 'chr8:56320187')	10103	10103	62196	62196	
