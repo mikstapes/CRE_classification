@@ -1,0 +1,275 @@
+---
+title: "Enhancers filtering"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=6, dpi = 300, message = FALSE)
+
+```
+
+## Description
+
+Notes to get a final set of HH22 heart enhancers after [CRUP](https://github.com/VerenaHeinrich/CRUP)
+prediction, with inspiration from Tobi
+
+```{r Load pkgs & txdb, results='hide'}
+
+library(here)
+
+bioc_pkg <- c("GenomicFeatures", "rtracklayer", "ChIPpeakAnno", "seqsetvis")
+tidy_pkg <- c("ggplot2", "tidyr", "dplyr", "readr")
+
+suppressMessages(lapply(bioc_pkg, require, character.only = TRUE)) 
+suppressMessages(lapply(tidy_pkg, require, character.only = TRUE))
+
+#Load pre-generated txdb obj for galGal6, created using ncbi 'all' gene sets to include not-yet curated mef2c
+gg6_txbd <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+  gg6_txbd <- keepStandardChromosomes(gg6_txbd, pruning.mode="coarse")
+
+
+```
+
+## Goal/Approach
+Take ATAC peaks (macs2, no model from BEDPE), overlap with CRUP output (single enhancers), and remove those 1kb *uptream* and 100bp *downstream* of TSS/promoter.
+
+ATAC peaks included in analysis (for now) is _naive_ overlap, i.e. no IDR, between peak sets (BED3) of 2 bio replicates, taken from calling bedtools intersect
+
+`bedtools intersect -a rep1.narrowPeak -b rep2.narrowPeak -wa -f 0.5 > overlap.bed`
+
+*TSS/promoter = +1kb/-200bp region around TSS (start of transcrips from TxDb)
+*Enhancers = ATAC peaks overlapping CRUP enhancers and non-overlapping TSS/promoter 
+
+```{r Get enhancers, warning=FALSE, results='hide'}
+
+# Import data as GRranges obj with rtracklayer
+crup_g <- import.bedGraph(here("input_data/get_enhancers", "CRUP_HH22h_r1.bedGraph"))
+  names(crup_g) <- paste0("crup_", seq_len(length(crup_g)))
+
+atac_g <- import.bed(here("input_data/get_enhancers", "atac_22h_pk.bed"))
+  names(atac_g) <- paste0("atac-pks_", seq_len(length(atac_g)))
+  ## Only keep 'standard' chromosomes, i.e. autosomes and chrW & chrZ
+  seqlevels(atac_g, pruning.mode="coarse") <- seqlevels(seqinfo(atac_g))[grep("^chr[0-9]{,2}$|chrW$|chrZ$", seqlevels(seqinfo(atac_g)))]
+
+  
+  
+
+# Define TSS/prom
+tss <- GenomicFeatures::promoters(gg6_txbd, upstream = 1000, downstream = 100)
+  tss <- trim(tss)  #trim 6 out of bound tss/promoters
+  unique_tss <- granges(tss[!duplicated.GenomicRanges(tss)])
+  
+# Get enhancers
+atac_distal <- atac_g[!overlapsAny(atac_g, unique_tss)] #length=40356. 40197(std chrom)
+enhancers <- atac_distal[overlapsAny(atac_distal, crup_g, maxgap = 250)] #6236(gap=250)
+    
+    # Export distal enhancers as bed file
+    #export.bed(enhancers, here("bed-outfiles", "get_enhancers", "HH22h_enhancer_distal_standard_chrom.bed"))
+
+```
+
+## Quick stats
+
+```{r Viz-seqsetviz, warning=FALSE, results='hide', eval=FALSE}
+
+ol_atac <- findOverlapsOfPeaks(atac_g, atac_distal, enhancers, 
+                               connectedPeaks = "keepAll")
+
+makeVennDiagram(ol_atac, 
+                NameOfPeaks = c("ATAC.2rep", "ATAC.distal", "Enhancers"))
+
+enh_filt_olaps <-  ssvOverlapIntervalSets(GRangesList(ATAC=atac_g, 
+                                                      CRUP.enhancers=crup_g, 
+                                                      Promoters_TSS=unique_tss))
+
+ssvFeatureVenn(enh_filt_olaps)
+
+```
+
+
+
+## Importing projected enhancers
+
+Filtered ATAC peaks as enhancers were projected on molgen cluster using [IPP](https://github.molgen.mpg.de/zehnder/genomic_projection.git)
+
+```{bash IPP-call, eval=FALSE, warning=FALSE, message=FALSE, results=FALSE}
+#! /bin/bash
+
+root=$(realpath .)
+
+export PATH=$root/genomic_projection/IPP:$PATH
+
+project_regions.sh \
+        $root/data/bed/HH22h_enhancer_distal.bed \
+        galGal6 \
+        mm10 \
+        50000 \
+        $root/pwaln_pyarrow_mm10_to_galGal6.pkl \
+        10 2> IPP_g2m_log.2
+```
+
+```{r IPP import& bed export, warning=FALSE, message=FALSE}
+
+## Write this to function for future use!!
+enh_proj <- read_tsv(here("input_data/get_enhancers", "HH22h_enhancer_proj.bed"), col_names = FALSE)
+enh_proj <- enh_proj %>% select(name=X1, 
+                            ref=X2, 
+                            coords_direct=X3,
+                            coords_djikstra=X4,
+                            score_direct=X5, 
+                            score_djikstra=X6,
+                            bridging_species=X15) %>% 
+                                    pivot_longer(cols = starts_with("score"), 
+                                    names_to = "proj_method", 
+                                    names_prefix = "score_", 
+                                    values_to = "distance_score")
+
+
+## Get thresholded proj using distance score >=0.97
+enh_proj_ipp <- enh_proj %>% 
+  filter(proj_method=="djikstra" & distance_score >=0.975) %>%
+  select(name, coords_djikstra) %>% 
+  tidyr::separate(coords_djikstra, into = c("chrom_proj", "center_proj"), sep = ":")
+
+  enh_proj_ipp$center_proj <- as.numeric(enh_proj_ipp$center_proj)
+
+## Extend +/- 250bp from projected center for easy viz
+enh_proj_ipp<- enh_proj_ipp %>% 
+  mutate(offset=250,  
+         start_proj=center-offset, 
+         end_proj=center+offset)
+
+#sort IPP df by chr
+# chr_order <- c(paste("chr",1:33,sep=""),"chrZ")
+# enh_proj_ipp$chrom <- factor(enh_proj_ipp$chrom, levels = chr_order)ß
+
+
+
+
+
+
+
+```
+
+
+```{r BED export}
+# enh_proj_df <- enh_proj_ipp %>% arrange(chrom, start) %>% select(chrom, start, end, name) #sort bed
+
+###---------write color-coded BED for track viz (galGal6)---------###  
+
+# convert atac peaks and filterd enhancers as GRanges to df
+atac_pks_filt <- list(atac=atac_g, enh=enhancers)
+atac_pks_filt_df <- lapply(atac_pks_filt, makeDFfromGranges)
+
+# append IPP df
+atac_pks_filt_df <- c(atac_pks_filt_df, list(enh.ipp=enh_proj_ipp))
+
+enh_bed <- atac_pks_filt_df$atac
+
+# specific if atac pks were enhancers and/or projected or not 
+enh_bed <- enh_bed %>% mutate(enhancer=name %in% atac_pks_filt_df$enh$name, 
+                              ipp.enhancer=name %in% atac_pks_filt_df$enh.ipp$name)
+
+# write to BED 
+# all HH22 atac peaks, with enhancers and projected enhancers color coded 
+
+enh_bed %>% mutate(score=0, 
+                  strand=".", 
+                  tsrt=start, 
+                  tend=end, 
+                  color=case_when(enhancer== TRUE & ipp.enhancer == TRUE ~ "87,31,78", 
+                                  enhancer== TRUE & ipp.enhancer == FALSE ~ "79,117,155",
+                                  TRUE ~ "146,201,177")) %>% 
+  select(-enhancer, -ipp.enhancer) %>% 
+  write_tsv(here("processed", "get_enhancers", "HH22h_enhancers_proj_colored.bed"), col_names = FALSE)
+
+##
+
+## Write BED (for mm10) ##
+
+enh_proj_ipp %>% arrange(chrom, start) %>% 
+  select(chrom, start, end, name) %>% 
+  write_tsv(here("processed", "get_enhancers", "HH22h_proj_enh_mm10.bed"), col_names = FALSE)
+
+
+
+
+
+
+
+
+```
+
+
+
+
+## Functions
+
+```{r FUNCTIONS, warning=FALSE, message=FALSE}
+
+##Granges is 1-based and BED is 0-based
+makeDFfromGranges <-  function(gr) {
+  df <-  tibble(chrom=as.character(seqnames(gr)),
+                start=start(gr)-1,
+                end=end(gr)-1, 
+                name=names(gr))
+  return(df)
+}
+
+get_standard_chroms <- function(gr, pruning.mode="coarse") {
+  si <- seqinfo(gr)
+  seqlevels(gr, pruning.mode = "coarse") <-seqlevels(si)[grep("^chr[0-9]{,2}$|chrX$|chrZ$",
+                                                               seqlevels(si))]
+  return(seqlevels(gr))
+}
+```
+
+
+
+## Other notes
+
+Installation/Loading of ComplexHeatMap depends on pkg Cairo, which requires Xquartz.
+Xquartz was installed with homebrew to fix this:
+`brew install --cask xquartz`
+
+See SOF issue [here](https://stackoverflow.com/questions/38952427/include-cairo-r-on-a-mac)
+
+Initially i wanted to show the relationship between 3 atac peak sets (i.e. all, distal, enhancers) with ComplexHeatmap::UpSet, but it looks like it shows the intersection as the length of ranges in bp(?), and not where each range is one item in the set. Left this out for now. 
+```{r Deprecated, eval=FALSE, message=FALSE, results='hide', warning=FALSE}
+
+latac <- GRangesList(atac=atac_g, distal=atac_distal, enhancers=enhancers)
+latac <- make_comb_mat(latac, mode = 'intersect')
+
+UpSet(latac)
+
+### Test viz using ChIPeakanno
+
+
+###-----TEST--move to dump/notes later----###
+
+
+tss_test <- toGRanges(here("txdb", "galGal6_promoter_regions.bed"))
+
+
+ol_enh <- findOverlapsOfPeaks(atac_g, crup_g, unique_tss)
+
+makeVennDiagram(list(atac_g, crup_g, unique_tss), by = "region", connectedPeaks = "keepAll")
+
+## Error in FUN(X[[i]], ...) : Inputs contains duplicated ranges.  please recheck your inputs.
+## Even though any(duplicated(unique_tss)) == FALSE
+
+
+            
+```
+
+> length(overlapsAny(atac_g, unique_tss))
+[1] 53658
+
+> length(findOverlaps(atac_g, unique_tss))
+[1] 28159
+
+> length(subsetByOverlaps(atac_g, unique_tss))
+[1] 13302
+
+> length(subsetByOverlaps(atac_g, unique_tss, invert = TRUE))
+[1] 40356

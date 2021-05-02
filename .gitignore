@@ -7,5 +7,10 @@
 .DS_Store
 txdb/
 plots/
-bed*/
+processed/
+test/
+enhancer_sets/
+input_data/
+rendered_Rmd/
+
 

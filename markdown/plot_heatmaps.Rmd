@@ -1,0 +1,470 @@
+---
+title: "Plot heatmaps for differential analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=10, fig.height=10, dpi = 300, 
+                      message = FALSE, warning=FALSE)
+```
+
+## Workflow
+Goal: Plot histone ChIP signals like h3k27ac and k27m3 over all enhancers, and all heart specific \
+enhancers
+
+1. Import enhancer set as granges
+2. Import bam files, compute coverage
+  2a. Normalize bam signals?
+3. Make heatmaps
+
+```{r Load libraries}
+
+#General purpose bioc pks
+library(bamsignals)
+library(Rsamtools)
+library(GenomicRanges)
+library(rtracklayer)
+library(GenomicAlignments)
+library(EnrichedHeatmap)
+
+#Pkg for setting color funcs
+library(circlize)
+
+#Other CRAN pks
+library(here)
+
+#Differential analysis
+library(csaw)
+library(edgeR)
+
+```
+
+## 1. Test-run
+
+Extract enriched regions at Tbx5 from k27ac chip bam file from ENCODE to as a small toy example.
+Plotting here is package data from EnrichedHeatmap
+```{r Test code}
+
+bam.path <- here("test-data", "e105hr1.H3K27AC.tbx5.bam")
+
+##--Define tbx5 target region, mm10
+
+tbx5 <- GRanges(seqnames = "chr5",
+                ranges = IRanges(start = 118200000, end = 121000000))
+    #seqlengths(tbx5) <- 2800000
+    #binned_tbx5 <- tileGenome(seqinfo(tbx5), tilewidth = 100)
+
+##--Import atac peaks as gr obj
+
+#gr_atac <- import.bed(here("bed-infiles", "atac-e105h_peaks.bed"))
+#    gr_atac <- gr_atac[overlapsAny(gr_atac, tbx5)] #136 ranges
+    #  or subsetByOverlaps(gr_atac, tbx5)
+
+##---Distal enhancers ##
+gr_enh <- import.bed(here("input_data", "e105h-enh_set.bed"))
+    gr_enh <- gr_enh[overlapsAny(gr_enh, tbx5)]
+
+##---Read in BAM and get coverage---##
+# Code from here https://github.com/jokergoo/EnrichedHeatmap/issues/1
+#read in bam files
+reads <- readGAlignments(bam.path)
+#extend reads to 200bp
+reads_extended <- resize(granges(reads), width = 200, fix = "start")
+#get coverage, output is a RleList obj
+reads_cov <- coverage(reads_extended)
+#covert to GRanges
+k27ac_cov <- as(reads_cov, "GRanges")
+
+    k27ac_cov_tbx5 <- k27ac_cov[overlapsAny(k27ac_cov, tbx5)]
+
+## make enriched heatmaps
+    #for 3000bp in 30 windows, for 100bp 'bin'
+mat2 <- normalizeToMatrix(k27ac_cov_tbx5, 
+                          resize(gr_enh, width = 1, fix = "center"), 
+                          value_column = "score",
+                          extend = 3000,
+                          mean_mode="w0",
+                          w = 30) 
+
+#Color functions to 'scale' displayed data, 0.975 quantile = 1
+
+##495049
+#3d433d
+# c("#464E47", "#8CB369")  
+# c("#424874", "#83AFAA")
+
+EnrichedHeatmap(mat2, col = col_fun, name = "k27ac_enh-tbx5")
+
+
+## Load pkg data
+
+load(system.file("extdata", "chr21_test_data.RData", package = "EnrichedHeatmap"))
+  tss_test <-  promoters(genes, upstream = 0, downstream = 1)
+  mat_test <-  normalizeToMatrix(H3K4me3, tss_test, 
+                                 value_column = "coverage", 
+                                 extend = 3000, mean_mode = "w0", w=30)
+  col_fun <-  colorRamp2(quantile(mat_test, c(0, 0.99)), c("#383d61", "#9CBFBB"))
+  EnrichedHeatmap(mat_test, col = col_fun, name = "k4me3", 
+                  width=unit(10, "cm"), height=unit(20, "cm"))
+  
+
+  
+```
+
+Script adapted for running on cmd line on the cluster to plot with full-sized filtered .bam
+
+## 2. Differential Analysis
+
+Get tissue-specific enhancers from differential peak analysis with ATAC data. Get heart-enriched, \
+limb-enriched, and 'shared enhancers to plot histone signals as EH. 
+
+Analysis parameters taken in parts from:
+- https://github.com/reskejak/ATAC-seq
+- https://github.com/vaquerizaslab/Ing-Simmons_et_al_dorsoventral_3D_genome
+
+E10.5 limb ATAC data from MDL
+rep1 (SRX5099261)
+rep2 (SRX5099262)
+
+```{r, eval=FALSE}
+##!!Code written to be run on server##
+#     basedir is /project/MDL_Ibrahim/MP_all/enhancers_analysis/
+
+##----------Load Libraries-----------
+library(bamsignals)
+library(Rsamtools)
+library(GenomicRanges)
+library(rtracklayer)
+library(GenomicAlignments)
+library(EnrichedHeatmap)
+library(BiocParallel)
+
+#Pkg for setting color funcs
+library(circlize)
+
+#Other CRAN pks
+library(here)
+library(dplyr)
+library(ggplot2)
+
+
+#Differential analysis
+library(csaw)
+library(edgeR)
+library(limma)
+
+
+
+##----------Global var and functions-----------
+
+# standard chroms only
+chr_gg <- paste0("chr", c(1:33, "Z"))
+chr_mm <- paste0("chr", c(1:19, "X"))
+
+#read parameters for PE atac
+params_gg <- readParam(pe = 'both', restrict = chr_gg)
+params_mm <- readParam(pe = 'both', restrict = chr_mm)
+
+# get differential intervals, where intervals are merged when they are within 250bp and total size
+# is =<1kb
+
+test_contrast <- function(x, mat, fit, counts) {
+  # counts: norm & filt bam windowcounts
+  # vs: contrast gr1 - grp2
+  # mat: design matrix
+  # fit: glmQLFit over norm counts
+
+  con <- makeContrasts(contrasts = vs, levels = colnames(mat))
+  message(con)
+  results <-  glmQLFTest(fit, contrast = con)
+  merged <- csaw::mergeResults(counts, results$table, tol=250, 
+                               merge.args = list(max_width = 1000))
+  return(merged)
+}
+
+##----------Load Data-----------
+
+# Load pks
+pks_heart <- import.bed(here("data", "atac-HH22h_peaks.bed"))
+pks_limb <-  import.bed(here("data", "atac-HH22h_peaks.bed"))
+
+pks_all <- union(pks_heart, pks_limb)
+
+# Load bam
+  # Note for future script, can have bam dir as arg
+bam_files <- list.files(here("data", "bam", "gg"), 
+                        pattern = "bam$", full.names=TRUE) %>% setNames(gsub(".bam$", "", basename(.))) #name atac-sample-r1/2
+
+
+
+
+##----------Generate counts-----------
+
+#count aln within peaks
+pks.count <- csaw::regionCounts(bam_files, pks_all, 
+                          param = param_gg, 
+                          BPPARAM = BiocParallel::MulticoreParam(4))
+#count BAM in 150bp windows
+atac_aln.counts <- csaw::windowCounts(bam_files, 
+                                param = param_gg,
+                                width = 150,
+                                BPPARAM = BiocParallel::MulticoreParam(6))
+
+#count BAM within a 2kb neighborhood for local enrichment
+atac_local.bkgr <- csaw::regionCounts(bam_files, 
+                                      regions = suppressWarnings(resize(rowRanges(atac_win.counts),
+                                                                        width = 2000, 
+                                                                        fix = "center")),
+                                      param = param_gg,
+                                      BPPARAM = BiocParallel::MulticoreParam(6))
+
+atac_global.bkgr<- csaw:windowCounts(bam_files,
+                                        param = params_gg, 
+                                        width = 2000, bin = TRUE,
+                                        BPPARAM = BiocParallel::MulticoreParam(6))
+
+# Get filter stats based on read counts of flanking 2kb regs around window counts, 
+# stat = win.counts - bkground.counts at each window
+      local.stat <- filterWindowsLocal(atac_aln.counts, atac_bgr.counts)
+      keep.local <- local.stat$filter > log2(3)
+      
+      global.stat <- filterWindowsGlobal(atac_aln.counts, atac_global.bkgr)
+      keep.global <- global.stat$filter > log2(3)
+
+    #### Plot logFC from local control ###
+    pdf(here("plots", "hist_local_FC.pdf"))
+    hist(local.stat$filter, xlab = "LogFC from 2kb local background",
+         breaks=100, main="", 
+         col="blue", xlim=c(0,5))
+    abline(v=log2(3), col="red", lwd=2)
+    dev.off()
+    
+    #### Plot logFC from global control ###
+    pdf(here("plots", "hist_global_FC.pdf"))
+    hist(local.stat$filter, xlab = "LogFC from 2kb local background",
+         breaks=100, main="", 
+         col="blue", xlim=c(0,5))
+    abline(v=log2(3), col="red", lwd=2)
+    dev.off()
+      
+            
+# Keep only regions within at least a 3 fold change above local background
+atac_filt.counts <- atac_aln.counts[keep,]
+
+
+
+##----------Normalize Counts-----------      
+
+# Loess normalization of peaks
+pks.count_norm <- csaw::normOffsets(pks.count, se.out = TRUE)
+
+# Normalization of 'local' enriched bam, i.e. de novo peaks
+atac_filt.counts_norm <- csaw::normOffsets(atac_filt.counts, se.out = TRUE)
+
+##--------------DA--------------  
+#order here is determined by the order of bam_files, i.e. bam_files[1] = sample1
+# [1] "atac-22FL-r1" "atac-22FL-r2" "atac-22H-r1"  "atac-22H-r2"
+pks <- asDGEList(pks.count_norm)
+aln <- asDGEList(atac_filt.counts_norm)
+
+##---(1)Design matrix from aln counts
+aln$samples$group <- c("HH24-FL", "HH24-FL", "HH24-heart", "HH24-heart")
+
+aln_design <- model.matrix(~0+group, data=aln$samples)
+aln_design
+
+#colnames(aln_design)
+#"groupHH24-FL"    "groupHH24-heart"
+
+## Plot MDS from limma ##
+    # Plot samples on 2-min scatter plot based on log2 FC 
+    # input is normalized count from aln, with CPM scaling
+aln_norm.cpm <- calculateCPM(atac_filt.counts_norm, use.offsets = TRUE)
+
+    pdf(here("plots", "MDS_24H-atac-CPMnorm.pdf"))
+    plotMDS(aln_norm.cpm, labels=names(bam_files),
+            col=c("#1A936F", "#C6DABF", "#C1666B", "#BF211E"))
+    dev.off()
+
+# Estimate binomial dispersion of all samples
+# input is DGElist of norm counts
+
+aln <-  edgeR::estimateDisp(aln, aln_design)
+
+
+    ## Plot BCV from edgeR ##
+    pdf(here("plots", "BCV_24H-atac-CPMnorm.pdf"))
+    plotBCV(aln)
+    dev.off()
+
+## Fit negative binomial lin model over counts
+aln.fit <- glmQLFit(aln, aln_design, robust=TRUE)
+    
+  ## Plot the fit
+pdf(here("plots", "Disp_24H-atac-fit.pdf"))
+plotQLDisp(aln.fit)
+dev.off()
+
+### Get differential peaks, heart vs limb contrasts
+colnames(aln_design) <- c("HH24.FL", "HH24.Heart")
+grp_names <-  colnames(aln_design)
+contrast_pairs <- c(paste0(grp_names[1], "-", grp_names[2]),
+                   paste0(grp_names[2], "-", grp_names[1]))
+
+#apply contrast from different contrast pairs, i.e. vectorize over pairwise contrasts
+DA.list <- mapply(test_contrast, x = contrast_pairs, 
+                  MoreArgs = list(mat = aln_design,
+                                  fit = aln.fit, 
+                                  counts = atac_filt.counts_norm))
+names(DA.list) <- contrast_pairs
+
+##Converting edgr results list as list of GRanges, differential stats as meta col
+## This is the final list of all 'regions'/peaks 
+
+edgr_to_gr <- function(x, counts) {
+  gr <- x$regions #region within the results DF is a gr obj
+  mcols(gr) <- DataFrame(x$combined,
+                     best.logFC = x$best$logFC
+                     logCPM = x$best$logCPM) 
+  return(gr)
+}
+
+DA.gr <- lapply(DA.list, edgr_to_gr, counts = atac_filt.counts_norm) #list of pks + stats
+
+
+## Make MA plot (test)
+
+
+heart_mpks <- DA.gr[["HH24.Heart-HH24.FL"]]
+heart_mpks <- heart_mpks[order(heart_mpks$best.logFC)]
+heart_mpks$sig <- "n.s"
+heart_mpks$sig[heart_mpks$FDR < 0.05] <- "significant"
+
+pdf(here("plots", "MA_heart_limb.pdf"))
+data.frame(heart_mpks) %>% 
+  ggplot(aes(x = logCPM, y = best.logFC, col = factor(sig, levels = c("n.s", "significant")))) +
+  geom_point() + scale_color_manual(values = c("#99ADAC", "#E0BE15")) + 
+  geom_smooth(inherit.aes=F, aes(x = logCPM, y = logFC), method = "loess") + 
+  geom_hline(yintercept = 0) + labs(col = NULL)
+dev.off()
+
+
+
+
+
+
+
+
+
+
+##--------------Output export--------------  
+
+#x: names(gr) to vectorize over
+# write_diff_bed <- function(gr, pair) {
+#   for (d in c("up", "down")) {
+#     gr <-  gr[gr$FDR < 0.05]
+#     gr <- gr[gr$direction == d]
+#     gr <- gr[order(gr$best.logFC)]
+#     diff_name <- paste0("DA_atac-", pair, "_", d,".bed")
+#     export.bed(gr, con = file.path(here(),"diff_analysis/", diff_name))
+#   }
+# #everything else is considered shared, or not sig differential 
+#     gr_shared <- gr[gr$direction == "mixed"]
+#     rest_name <- paste0("DA_atac-", pair, "_shared.bed")
+#     export.bed(con = file.path(here(),"diff_analysis/", rest_name))
+# }
+# 
+# lapply(DA.gr, write_diff_bed, pair=names(DA.gr)
+# lapply(DA.gr, write_diff_bed, pair=names(DA.gr))
+
+
+lapply(names(DA.gr), function(x) {
+  for (d in c("up", "down")) {
+    gr <- DA.gr$"x"
+    gr <-  gr[gr$FDR < 0.05]
+    gr <- gr[gr$direction == d]
+    gr <- gr[order(gr$best.logFC)]
+    diff_name <- paste0("DA_atac-", x, "_", d,".bed")
+    export.bed(gr, con = file.path(here(),"/diff_analysis", diff_name))
+})
+
+
+h.results <- glmQLFTest(aln.fit, 
+                        contrast = makeContrasts(HH24.Heart-HH24.FL, levels = aln_design))
+rowData(aln) <- cbind(rowData(aln), h.results$table)
+
+h.mpks <- mergeWindows(rowRanges(aln), tol = 250, max.width = 1000)
+    tab.best <- getBestTest(h.mpks$id, h.results$table)
+    h_merged  <- GRanges(cbind(h.mpks$region, 
+                               h.results$table[tab.best$rep.test, -4], tab.best[,-c(7:8)]))
+    h_merged <- h_merged[order]
+    
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+After DA analysis, and enhancer filtering to get a list of all active enhancers. Can start getting \
+a list of heart-specific, limb-specific, and shared enhancers with bedtools
+
+- All enh = genrich pks + CRUP of histones
+- DA accessibility from differential analysis with edgR, take only 'up' regions
+- T-Eh = intersect DA(up) + All enh, keep all Enh
+
+```{bash, eval = FALSE}
+bedtools 
+  -a $enh_set \
+  -b $atac_up \
+  -wa > $da_out
+  
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Foot Notes
+- could somehow use bamsignals to get binned count for heatmaps??
+
+
+```{r Code-dump }
+
+# gives information about path of bam and bai file (Object)
+bf <- Rsamtools::BamFile(here("test-data", "e105hr1.H3K27AC.tbx5.bam"))
+
+
+
+#Binned signals of K27ac over atac peaks, bin = 100bp
+bf_profile_bin100 <- bamsignals::bamProfile(bam.path, 
+                                     gr_atac, 
+                                     binsize = 100,
+                                     shift = 100)
+```
+
+
