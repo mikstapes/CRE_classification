@@ -1,0 +1,205 @@
+---
+title: "Enhancer calling strategy report"
+author: "Mai Phan (phan@molgen.mpg.de)"
+date: "8/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+
+library(here)
+source(here("R", "functions.R"))
+```
+
+```{r load libs, results='hide'}
+bioc_pkg <- c("GenomicFeatures", "rtracklayer", "TxDb.Mmusculus.UCSC.mm10.knownGene")
+cran_pkg <- c("here", "dplyr", "readr", "tidyr", "ggplot2")
+
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
+suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
+```
+
+# Enhancer calling strategy
+
+-   Data: integration of ATAC & Histone ChIPs + TSS annotations. ENCODE data for mouse E10.5 heart histone ChIP
+
+-   Dependencies:
+
+-   CRUP: random-forest based prediction of active enhancer regions) --\> active enhancer-like regions
+
+-   EpiCSeg: HMM segmentation of chromatin profile) --\> active promoter-like regions
+
+-   TxDb for mm10 and galGal6 (UCSC)
+
+## 1. Data processing
+
+i\. ENCODE data: raw BAM files (SE50) from both replicates were downloaded [here](https://bit.ly/3mNLo8O). Duplicates and unmated reads were removed *(NOTE: Should apply same filtering for consistency with chicken data!).* See getBams.sh on MDL_ChIPseq/Mikie/cre_predict
+
+ii\. In-house data: adaptor sequences from PE100 fastq were first removed using cutadapt 1.10, aligned with bowtie2, dups removed with Picard, chrM reads were removed and unmated/unmapped + reads below MAPQ 10 were removed with samtools. See ChIPmentation + ATAC processing shell scripts on MDL_Ibrahim.
+
+-   ATAC peaks were called using [Genrich](https://github.com/jsh58/Genrich) from name sorted BAM files. Reads were extended from the 5' cut sites to 100bp before pileups and peak-calling. Replicates and/or blacklisted regions were included if available. See genrich_call.sh on MP_all/ATAC
+
+## 2. Promoter calling
+
+Core promoter is the minimal region including the TSS and can extend up to \~45bp up & downtream of the TSS for \~100bp in size. The core & 'proximal' promoter region is combined and set to be the region 1kb upstream and 200bp downstream of **an annotated TSS**.
+
+```{r get_TSS, eval=FALSE}
+
+mm10_txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
+mm10_txdb <- getStandardChrom(mm10_txdb, ref = "mm10")
+mm10_prom <- unique(trim(promoters(mm10_txdb, upstream = 1000, downstream = 200)))
+
+gg6_txdb <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+gg6_txdb <- getStandardChrom(gg6_txdb, ref = "galGal6")
+gg6_prom <- unique(trim(promoters(gg6_txdb, upstream = 1000, downstream = 200)))
+
+```
+
+The problems with this rather arbitrarily set regions are:
+
+i.  Differences in TSS annotation between mm10 and Galgal6. For example()
+ii. Not all TSS are within active promoter regions, for example (chr2:47,370,104-47,382,135, galGal6)
+
+Because some regions can act as both a promoter for one Tx and enhancer for another, to get the final enhancer list I want to exclude regions acting as an active promoter. This then will be determined by 2 parameters:
+
+i.  Promoter-like chromatin profile as segmented using EpiCSeg, where log of mean counts H3K4me3 is at least 2x that of H3K4me1.
+(NOTE[05.10.21]: To avoid loading too many dependencies and repeated counting, I will now just take count/ratios from CRUP-norm.R output, where counts in 100bp bins are normalized to Input. Counts are then quantile normalized before ratios are calculated)
+
+ii. Detectable transcripts from RNAseq counts (TPM \> 2, counts from `GenomicAlignments::summarizeOverlaps` where features = txdb, and reads = transcripts with unique TSS).
+
+-   NOTE: It's important here to provide Transcripts which are unique/non-overlapping as this reads alignment to more than one features will be discarded. This is especially important for the TxDb object from chicken, which takes annotation from the NCBI *Refseq All* and as such will have a lot of redundant annotations. My solution for this is to:
+
+    -   First take only Tx with unique TSS.
+
+    -   These Tx then get filtered to keep only those where its TSS is within a promoter-like chrom state (from EpiCSeg.
+
+    -   The remainining Tx: if any have (1) one or many overlapping Tx (TSS within 100bp) and (2) the overlapping Tx have very similar length (rounded up by `ceiling()`), then they are considered either redundant annotations or isoforms of the same Tx, and only the longest Tx of these are retained for counting. (See function `getUniqueTx()`).
+
+The final promoter regions will be fixed by the TSS (-1kb/+200bp).
+
+\#[show diagrams/flowchart]
+
+\#[show examples from UCSC browser]
+
+Additionally, to minimize the dependence on available annotations, any region having promoter-like signature (i.e. ATAC peaks & promoter-like chromatin profile) can also be considered as an active promoter, so long as there is detectable transcripts in its immediate proximity. For this:
+
+i.  Load in ATAC peaks called by Genrich
+
+ii. Take prom-like regions not containing any annotated & unique TSS
+
+iii. Keep only ATAC peaks which (1) overlap with (ii) as possible promoter, and (2) do not overlap already annotated promoter regions from TSS.
+
+iv. Get RNAseq read counts at these regions with `GenomicAlignments::summarizeOverlaps`
+
+v.  Get library size and calculate CPM and average CPM values from raw counts, keep only peaks with avg CPM >= 2.
+
+    1.  Because ATAC peaks can sometimes be rather broad, that is, much wider than what one could expect from a promoter regions I resize them to have the same width as annotated prom regions (i.e. 1.2kb), fixed by the original center. I then sort all promoter-like ATAC peaks by their avg.CPM values. For each peaks, nearby peaks which are overlapping or at most a promoter-width distance are discarded if they have lower avg.CPM values. This allows me to avoid having multiple 1.2kb promoter regions, especially in busy genomic regions with broad marks and accessibility.
+    
+
+## 3. Enhancer calling
+
+
+
+
+
+## 4. Quality-control
+
+```{r get bam counts at PROM/ENH eval=FALSE}
+
+cran_pkg <- c("here", "tidyverse")
+bioc_pkg <- c("rtracklayer", "bamsignals")
+
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE))
+suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
+
+source(here("scripts", "functions.R"))
+
+### Load BAM files 
+
+mBAM  <- list.files(here("data", "bam", "e105h", "rep1"), pattern = ".bam$", full.names = TRUE) %>%
+        setNames(gsub(".bam$", "", basename(.)))
+
+gBAM <- list.files(here("data", "bam", "HH22h"), pattern = ".bam$", full.names = TRUE) %>%
+        setNames(gsub(".bam$", "", basename(.)))
+
+
+### Load enh/prom as GRanges
+
+prom.dir <- here("prom_calling")
+enh.dir <- here("enhancer_sets")
+
+mPROM.path <- file.path(prom.dir, "e105h", "e105h_PROM.bed")
+gPROM.path <- file.path(prom.dir, "HH22h", "HH22h_PROM.bed")
+
+mENH.path <- file.path(enh.dir, "e105h", "e105h_ENH_filt_from_atac.bed")
+gENH.path <- file.path(enh.dir, "HH22h", "HH22h_ENH_filt_from_atac.bed")
+
+#load in regions, resize to 2kb fixed by center
+
+loadFixedRanges <- function(path, ref.genome, win.size) {
+    bed  <- import.bed(path)
+    bed  <- getStandardChrom(bed, ref = ref.genome)
+    bed <- resize(bed, width = win.size*2, fix = "center")
+    return(bed)
+}
+
+mGR  <- lapply(c(mPROM.path, mENH.path), 
+               loadFixedRanges,
+               ref.genome = "mm10", 
+               win.size = 1000)
+
+
+gGR  <- lapply(c(gPROM.path, gENH.path), 
+               loadFixedRanges,
+               ref.genome = "galGal6", 
+               win.size = 1000)
+
+
+get_bamProfile <- function(bam, bam.list, gr, target_genome) {
+
+  bf  <- names(which(bam.list == bam)); print(bf)
+
+  # filter chroms
+  gr <- getStandardChrom(gr, ref = target_genome)
+
+  # get count as vector
+  if (target_genome == "mm10") { #SE BAM
+    sigs <- sapply(bamProfile(bampath = bam,
+    gr = gr,
+    shift = 100,
+    mapqual = 10, filteredFlag = 1024, ss = F, verbose =F)@signals,
+    function(x) x)
+    } else { #PE BAM
+    sigs <- sapply(bamProfile(bampath = bam,
+    gr = gr,
+    paired.end = "midpoint",
+    mapqual = 10, filteredFlag = 1024, ss = F, verbose = F)@signals,
+    function(x) x)
+    }
+    return(sigs)
+  }
+
+mCount  <- lapply(mBAM, function(x){
+    mclapply(mGR,
+             get_bamProfile,
+             bam = x, bam.list = mBAM, target_genome = "mm10",
+             mc.cores = 6)
+    })
+
+gCount  <- lapply(gBAM, function(x){
+    mclapply(gGR,
+             get_bamProfile,
+             bam = x, bam.list = gBAM, target_genome = "galGal6",
+             mc.cores = 6)
+    })
+
+
+save(mCount, gCount, file = here("data", "RData", "enh_prom_epi_counts_1kb_win.RData"))
+
+```
+
+
+

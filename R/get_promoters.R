@@ -1,12 +1,12 @@
 #! /home/phan/miniconda3/envs/r_env/bin/Rscript
 library(here)
-source(here("scripts", "functions.R"))
+source(here("R", "functions.R"))
 
 # get proximal proms based on TSS, chrom profile and RNA read counts
 
 
 args <- commandArgs(trailingOnly=T)
-if (length(args) != 6) stop('Usage: ./get_enh_set.R <ref genome> <prom_state.bed> <atac_peaks.bed> <RNA bam dir> <outdir> <sample_name>')
+if (length(args) != 6) stop('Usage: ./get_promoters.R <ref genome> <prom_state.bed> <atac_peaks.bed> <RNA bam dir> <outdir> <sample_name>')
 
 bioc_pkg <- c("GenomicFeatures", "rtracklayer", "GenomicAlignments", "Rsamtools")
 tidy_pkg <- c("ggplot2", "tidyr", "dplyr", "readr")
@@ -37,11 +37,9 @@ if (ref_genome %in% genomes) {
   if (ref_genome == "hg38") pkg <- "TxDb.Hsapiens.UCSC.hg38.knownGene"
   suppressMessages(require(pkg, character.only = TRUE))
   assign("txdb", eval(parse(text = pkg)))
-  txdb <- getStandardChrom(txdb, ref = ref_genome)
   atac <- getStandardChrom(atac, ref = ref_genome)
 } else if (ref_genome=="galGal6") {
   txdb <- loadDb("/project/MDL_Ibrahim/MP_all/annotations/gg6/TxDb.galGal6.ncbiRefseq.sqlite")
-  txdb <- getStandardChrom(txdb, ref = ref_genome)
   atac <- getStandardChrom(atac, ref = ref_genome)
 } else {
   stop('genome not supported')
@@ -53,6 +51,7 @@ if (ref_genome %in% genomes) {
 
 Tx <- GenomicFeatures::transcripts(txdb)
   Tx <- trim(Tx[!duplicated(start(Tx))])
+  Tx <- getStandardChrom(Tx, ref = ref_genome)
 
 #- Filter 2: take overlap of TSS and prom-like state
 
