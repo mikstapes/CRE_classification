@@ -1,0 +1,505 @@
+---
+title: "figures for end of year talks"
+author: "Mai Phan (phan@molgen.mpg.de)"
+date: "9/7/2021"
+output: html_document
+fig_crop: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+
+```
+
+```{r Loading libraries}
+
+bioc_pkg <- c("rtracklayer", "bamsignals")
+cran_pkg <- c("here", "tidyverse", "RColorBrewer", "viridisLite")
+
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
+suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
+
+source(here("R", "functions.R"))
+```
+
+This is my plotting ground for different figures I need for talks from september until end of 2021
+
+```{r ggplot aesthetics, echo=FALSE}
+## Plotting theme
+
+#for consistency..
+
+plot_theme <- theme_bw()
+
+barplot_theme <- plot_theme  + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size = 15),
+        axis.title = element_blank(),
+        legend.position = "none", 
+        axis.text.y = element_text(size = 15, face = "bold"),
+        axis.text.x = element_text(size = 13),
+        axis.ticks.y = element_blank(), 
+        axis.line.x = element_line(size = 0.2),
+        panel.border = element_blank())
+
+stacked.barplot_theme_2 <- plot_theme  + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size =20),
+        axis.text = element_text(size = 20),
+        axis.title = element_text(size = 25, face = "bold"),
+        axis.line.x = element_line(size = 0.25),
+        axis.line.y = element_line(size = 0.25),
+        legend.position = "bottom", 
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 15))
+
+boxplot_theme <- plot_theme  + 
+  theme(panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size =20),
+        axis.text.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.line.x = element_line(size = 0.25),
+        axis.line.y = element_line(size = 0.25),
+        panel.border = element_blank(),
+        legend.title = element_blank())
+
+strip_theme <- theme(strip.background = element_blank(),
+                    strip.switch.pad.wrap = unit(1, "lines"), 
+                    strip.text = element_text(size = 30, face = "bold.italic"))
+
+## Colors scheme for ENH class
+ENH_colors_light <- c("#fed439ff", "#709AE1", "#97a7b3")
+ENH_colors_dark <- c("#fec701", "#5787db", "#899ca9")
+```
+
+
+## CRE idenfication
+
+1.  Plots for promoter calling: chicken vs mouse
+
+```{r gg, Annotated promoters, out.width="200%", fig.height = 8, fig.align='center'}
+
+length1 <- c(38154, 17422, 8619)
+prom_grp1 <- c("All unique TSS", 
+               "TSS at promoter-like regions", 
+               "Actively transcribed TSS")
+
+prom_df1 <- tibble(prom_grp1, length1)
+prom_df1$prom_grp1 <-  factor(prom_grp1, 
+                              levels = c("All unique TSS",  "TSS at promoter-like regions", "Actively transcribed TSS"))
+
+
+length2 <- c(47225, 5367, 2832)
+prom_grp2 <- c("All ATAC peaks", 
+               "Peaks at promoter-like regions", 
+               "Peaks at active promoter")
+
+prom_df2 <- tibble(prom_grp2, length2)
+
+prom_df2$prom_grp2 <-  factor(prom_grp2, 
+                              levels = c("All ATAC peaks",
+                                         "Peaks at promoter-like regions", 
+                                         "Peaks at active promoter"))
+
+
+prom_p1 <- prom_df1 %>% 
+  ggplot(aes(x = fct_rev(prom_grp1), y = length1, fill = prom_grp1)) +
+  geom_bar(stat = "identity", width = 0.85, alpha = 0.9) +
+  coord_flip() +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 50000)) +
+  barplot_theme + 
+  theme(aspect.ratio = 1.3/1) 
+
+prom_p2 <- prom_df2 %>% 
+  ggplot(aes(x = fct_rev(prom_grp2), y = length2, fill = prom_grp2)) +
+  geom_bar(stat = "identity", width = 0.85, alpha = 0.9) + 
+  coord_flip() +
+  scale_x_discrete(position = "top") +
+  scale_y_reverse(expand = c(0, 0), limits = c(50000, 0)) +
+  barplot_theme +
+  theme(aspect.ratio = 1.3/1) 
+
+par(mfrow = c(1,2))
+prom_p1 
+prom_p2
+
+```
+
+```{r mm, all proms, fig.width= 15, fig.align='center'}
+
+length3 <- c(25111, 14159)
+prom_grp3 <- c("All EPD promoters", 
+               "Active promoters")
+
+prom_df3 <- tibble(prom_grp3, length3)
+prom_df3$prom_grp3 <-  factor(prom_grp3, 
+                              levels = c("All EPD promoters", "Active promoters"))
+
+prom_df3 %>% 
+  ggplot(aes(x = fct_rev(prom_grp3), y = length3, fill = prom_grp3)) +
+  geom_bar(stat = "identity", width = 0.85, alpha = 0.9) +
+  coord_flip() +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 30000)) +
+  barplot_theme +
+  theme(aspect.ratio = 0.75) 
+
+```
+
+2. Plots for enhancer filtering
+
+```{r ENH stats, out.width="200%", fig.height = 8, fig.align='center'}
+
+mm_stats <- read_tsv(here("enhancer_sets", "mouse", "e105h_ENH_filt_from_atac_stats.tsv")) %>% 
+  mutate(spc = "E10.5 heart")
+
+gg_stats <- read_tsv(here("enhancer_sets", "chicken", "Hh22h_ENH_filt_from_atac_stats.tsv")) %>% 
+  mutate(spc = "HH22h heart")
+
+enh_stats <- rbind(mm_stats, gg_stats) %>% 
+  mutate(gr_label = fct_relevel(factor(gr_label),
+                                "Active enhancers", 
+                                "Active promoters", 
+                                "CRUP peaks", 
+                                "ATAC peaks(distal)", 
+                                "ATAC peaks"))
+
+colors <- viridis(7, alpha = 1, option = "turbo")
+enh_stats %>% 
+  ggplot(aes(x = fct_rev(gr_label),
+             y = gr_count,
+             fill = gr_label)) +
+  geom_bar(stat = "identity", width = 0.9, alpha = 0.9) +
+  facet_grid(cols = vars(spc)) +
+  coord_flip() +
+  scale_y_continuous(expand = c(0, 0), 
+                     breaks = seq(0, 75000, by = 15000),
+                     limits = c(0, 75000)) +
+  scale_fill_manual(values = colors[3:7]) +
+  barplot_theme +
+  theme(panel.spacing = unit(2, "lines"), 
+        aspect.ratio = 1.5, 
+        strip.text = element_text(size = 20))
+  
+
+```
+
+3. Plots for norm signals over called ENH/PROM
+
+
+
+
+
+
+## IPP
+
+```{r load new IPP}
+
+# load CRUP projs
+
+mENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "mouse", "e105h_ENH_filt_from_atac.proj"))
+gENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "chicken", "HH22h_ENH_filt_from_atac.proj"))
+
+# get threshold for distance score based on max distance between proj and AP
+
+d50 <- 30000 #preset distance half-life
+max_distance_direct <- 1000 # within 1kb distance for direct projection
+max_distance_djikstra <- 2500 # within 3kb distance for djikstra projections
+
+# calculate threshold from set max distance(s)
+
+dir_cutoff <- getIPPThreshold(d50, max_distance_direct)
+dj_cutoff <- getIPPThreshold(d50,max_distance_djikstra)
+
+# get projected df based on thresholding 
+
+gENH_proj_df <- getProjCoordAsDF(gENH_ipp_df, dir_cutoff, dj_cutoff)
+mENH_proj_df <- getProjCoordAsDF(mENH_ipp_df, 
+                                 dir_cutoff,
+                                 getIPPThreshold(d50, 5200))
+
+## NOTE: only for this time (11-9-21, there's some duplicated ENH)
+
+mENH_proj_df <- distinct(mENH_proj_df, name, .keep_all = TRUE)
+gENH_proj_df <- distinct(gENH_proj_df, name, .keep_all = TRUE)
+
+######## convert to GRanges & export projected point #######
+
+mENH_proj_gr <- IPPtoGRanges(mENH_proj_df, target_genome = "galGal6")
+  resized_mgr <- resize(mENH_proj_gr, width = 500, fix = "center")
+  mENH_proj_grl <- splitAsList(resized_mgr, mENH_proj_gr$cons.gr)
+  lapply(names(mENH_proj_grl), function(x) {
+    out.bed <- paste0(x, "_ENH_proj_gg6.bed")
+    gr <- mENH_proj_grl[[x]]
+    export.bed(gr, 
+               here("enhancer_sets", "mouse", out.bed))
+    })
+gENH_proj_gr <- IPPtoGRanges(gENH_proj_df, target_genome = "mm10")
+  resized_ggr <- resize(gENH_proj_gr, width = 500, fix = "center")
+  gENH_proj_grl <- splitAsList(resized_ggr, gENH_proj_gr$cons.gr)
+  lapply(names(mENH_proj_grl), function(x) {
+    out.bed <- paste0(x, "_ENH_proj_mm10.bed")
+    gr <- mENH_proj_grl[[x]]
+    export.bed(gr, 
+               here("enhancer_sets", "chicken", out.bed))
+    })
+  
+save(mENH_proj_gr, gENH_proj_gr, file = here("RData", "IPP_Granges-0921.RData"))  
+```
+
+
+```{r IPP plot: SC only, out.width="200%", fig.height = 7, fig.align='center'}
+
+# plot SC conserved as direct score of >= 0.99
+sc_count <- c(1266, 11931, 2046, 11558)
+sc_class <- c("Sequence-Conserved","Non-Conserved",
+              "Sequence-Conserved","Non-Conserved")
+sc_spc <- c(rep("E10.5 ENH", 2), rep("HH22 ENH", 2))
+
+sc_df <- tibble(sc_spc, sc_class, sc_count)
+
+
+  sc_df %>% 
+    ggplot(aes(fill=factor(sc_class), 
+               y=sc_count, 
+               x=fct_rev(sc_spc))) +
+    geom_bar(stat = "identity", 
+             color="#666666", position = position_fill(vjust = 0.5)) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values=ENH_colors_light[c(3,1)]) +
+    coord_flip() +
+    geom_text(stat="identity", 
+          aes(label=sc_count), 
+          position = position_fill(vjust = 0.5), size = 7) +
+    stacked.barplot_theme +
+    theme(aspect.ratio = 0.65,
+          legend.text = element_text(size = 18))
+
+```
+
+```{r IPP plot: all}
+
+ipp_m <- mENH_proj_df %>% group_by(gr) %>% tally() %>% 
+  mutate(sp = "E10.5 ENH")
+
+ipp_g <- gENH_proj_df %>% group_by(gr) %>% tally() %>% 
+  mutate(sp = "HH22 ENH")
+
+ENH_stats1 <- rbind(ipp_m, ipp_g)
+
+# ENH_count <- c(1993, 5719, 5483, 4260, 5758, 5289)
+# ENH_class <- c("SC", "PC", "NC", "SC", "PC", "NC")
+# ENH_sp <- c(rep("E10.5 ENH", 3), rep("HH22 ENH", 3))
+# 
+# ENH_stats1 <- tibble(ENH_sp, ENH_class, ENH_count)
+
+ENH_stats1 %>% 
+    ggplot(aes(fill=factor(gr), 
+               y=n, 
+               x=fct_rev(sp))) +
+    geom_bar(stat = "identity", 
+             color="#666666", position = position_fill(vjust = 0.5)) +
+    geom_text(stat="identity", 
+              aes(label=n), 
+              position = position_fill(vjust = 0.5), size = 7) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values=ENH_colors_light[3:1]) +
+    coord_flip() +
+    stacked.barplot_theme +
+    theme(aspect.ratio = 0.65)
+
+```
+
+```{r IPP plot dmax}
+
+#####--- Load CRUP projs ---#####
+
+gENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "chicken", "HH22h_ENH_filt_from_atac.proj"))
+mENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "mouse", "e105h_ENH_filt_from_atac.proj"))
+
+#####--- Load ATAC pks ---#####
+
+mATAC <- import.bed(here("input_data", "ATAC", "atac-e105h_peaks.bed"))
+  mATAC <- getStandardChrom(mATAC, ref = "mm10")
+
+  
+gATAC <-   import.bed(here("input_data", "ATAC", "atac-HH22h_peaks.bed"))
+  gATAC <- getStandardChrom(gATAC, ref = "galGal6")
+
+
+#####--- Set threshold ---#####
+
+d50 <- 30000 #preset distance half-life
+
+dmax.bp <- c(500, 3000) 
+    dmax.score <- purrr::map_dbl(dmax.bp, getIPPThreshold, dh = d50) # calculate threshold from set max distance(s)
+
+dmax_dir <- dmax.score[1] #set max distance for direct projection ~1kb
+
+#####--------- Get proj w cut off as GRanges --------- #####  
+
+##- Get projected df based on thresholding, loops over all dmax score 
+# keep the same threshold for both proj method
+# removes proj below cutoff
+  
+##### chicken 3kb ####
+gENH_proj_3kb.df <- getProjCoordAsDF(gENH_ipp_df, dmax.score[1], dmax.score[2]) %>% 
+  distinct(name, .keep_all = TRUE)
+
+gENH.PC_GR <- IPPtoGRanges(filter(gENH_proj_3kb.df, gr == "PC"), target_genome = "mm10")
+gENH.PC_GR$distance <- mcols(distanceToNearest(gENH.PC_GR, mATAC))$distance
+gENH.PC_GR$distance_gr <- ifelse(round(gENH.PC_GR$distance) <= 2000L, 
+                                 "within", 
+                                 "outside")
+
+gENH_proj.GR <- GRangesList("SC" = IPPtoGRanges(filter(gENH_proj_3kb.df, gr == "SC"), target_genome = "mm10"),
+                     "PCw" = gENH.PC_GR[which(gENH.PC_GR$distance_gr == "within")],
+                     "PCo" = gENH.PC_GR[which(gENH.PC_GR$distance_gr == "outside")],
+                     "NC" = IPPtoGRanges(filter(gENH_proj_3kb.df, gr == "NC"), target_genome = "mm10"))
+
+
+
+
+##### mouse 3kb ####
+mENH_proj_3kb.df <- getProjCoordAsDF(mENH_ipp_df, dmax.score[1], dmax.score[2]) %>% 
+  distinct(name, .keep_all = TRUE)
+
+mENH.PC_GR <- IPPtoGRanges(filter(mENH_proj_3kb.df, gr == "PC"), target_genome = "galGal6")
+mENH.PC_GR$distance <- mcols(distanceToNearest(mENH.PC_GR, gATAC))$distance
+mENH.PC_GR$distance_gr <- ifelse(round(mENH.PC_GR$distance) <= 1000L, 
+                                 "within", 
+                                 "outside")
+
+mENH_proj.GR <- GRangesList("SC" = IPPtoGRanges(filter(mENH_proj_3kb.df, gr == "SC"), target_genome = "galGal6"),
+                     "PCw" = mENH.PC_GR[which(mENH.PC_GR$distance_gr == "within")],
+                     "PCo" = mENH.PC_GR[which(mENH.PC_GR$distance_gr == "outside")],
+                     "NC" = IPPtoGRanges(filter(mENH_proj_3kb.df, gr == "NC"), target_genome = "galGal6"))
+
+
+
+save(gENH_proj.GR, mENH_proj.GR, file = here("RData", "IPP_d3000_gr.RData"))
+
+```
+
+```{r get counts eval=FALSE}
+
+getIPPbam <- function(bam, gr, target_genome) {
+  
+  bf  <- names(which(bam.list == bam)); print(bf)
+
+  # filter chroms
+  gr <- getStandardChrom(gr, ref = target_genome)
+  
+  # get count as vector
+  if (target_genome == "mm10") { #SE BAM
+    sigs <- sapply(bamProfile(bampath = bam,
+                              gr = gr,
+                              binsize = width(gr[1]), 
+                              shift = 100,
+                              mapqual = 10, filteredFlag = 1024, ss = F, 
+			      verbose =F)@signals, 
+                   function(x) x) 
+    } else { #PE BAM
+    sigs <- sapply(bamProfile(bampath = bam,
+                              gr = gr,
+                              binsize = width(gr[1]), 
+                              paired.end = "midpoint",
+                              mapqual = 10, filteredFlag = 1024, ss = F, 
+			      verbose = F)@signals, 
+                   function(x) x)  
+    }
+    return(sigs)
+  }
+
+#####- Load Gr -#####
+
+load(here("IPP", "IPP_d3000_gr.RData"))
+
+#####- Read BAM -#####
+
+h22.bamf  <- list.files(here("data", "bam", "HH22h"), pattern = ".bam$", full.names = TRUE) %>%
+	setNames(gsub(".bam$", "", basename(.)))
+
+h10.bamf  <- list.files(here("data", "bam", "e105h", "rep1"), pattern = ".bam$", full.names = TRUE) %>%
+	setNames(gsub(".bam$", "", basename(.)))
+
+#####- BAM count: gENH-#####
+
+gENH_proj.GR  <- lapply(gENH_proj.GR, function(x) {
+resize(x, fix="center", width = 1000)})
+
+bam.list  <- h10.bamf
+gcount.list <- lapply(h10.bamf, function(x){
+  r <- mclapply(gENH_proj.GR, 
+                   getIPPbam,
+                   bam = x, 
+		   target_genome = "mm10", mc.cores = 4)
+})
+
+names(gcount.list)  <- c("ATAC", "H3K27AC", "H3K27ME3", "H3K4ME1", "H3K4ME3")
+
+#####- BAM count: mENH-#####
+
+mENH_proj.GR  <- lapply(mENH_proj.GR, function(x) {
+resize(x, fix="center", width = 1000)})
+
+bam.list  <- h22.bamf
+mcount.list <- lapply(h10.bamf, function(x){
+  r <- mclapply(mENH_proj.GR, 
+                   getIPPbam,
+                   bam = x, 
+		   target_genome = "mm10", mc.cores = 4)
+})
+
+#####- Save output -#####
+save(gcount.list, mcount.list, file =  here("data", "gENH_proj_bamcounts.RData"))
+
+
+#####- Tidy -#####
+
+# combine m&g proj
+
+count.list <- list("chicken" = gcount.list, "mouse" = mcount.list)
+
+# unlist
+
+count_wide <- unlist(count.list, recursive = F)
+
+tidy_count <- map_dfr(names(count_wide), function(x){
+  tibble(sig = count_wide[[x]], 
+         col=rep(x, length(count_wide[[x]]))) %>% 
+    separate(col, into = c("sp", "gr"))
+})
+
+```
+
+```{r counts viz}
+
+load(here("RData", "bamcounts_d3000_df.RData"))
+tidy_count <- tidy_count %>% group_by(sp, histone) %>% 
+  mutate(sigx = round(scales::rescale(sig, to = c(0,1)), digits = 3)) %>% ungroup()
+
+p.counts <- tidy_count %>% 
+  ggplot(aes(x = gr, y = sigx, fill = gr)) +
+  geom_boxplot() +
+  facet_grid(factor(sp) ~ factor(histone)) +
+  scale_y_log10(name = "Normalized read count", n.breaks = 3)+
+  scale_fill_manual(values=c(ENH_colors_light[1:2], "#c0d2f2", ENH_colors_light[3])) + 
+  xlab("Distance threshold (bp)") +
+  boxplot_theme + strip_theme +
+  theme(panel.spacing = unit(1, "lines"), 
+        plot.margin = margin(1,1,1,1, unit = "lines"),
+        panel.border = element_rect(size = 0.5, fill = NA), 
+        legend.position = "bottom", 
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 15)) 
+
+
+```
+

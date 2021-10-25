@@ -1,0 +1,590 @@
+---
+title: "IPP_parameterization"
+author: "Mai Phan (phan@molgen.mpg.de)"
+date: "8/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+
+library(here)
+source(here("R", "functions.R"))
+
+```
+
+```{r load_libs}
+
+bioc_pkg <- c("rtracklayer", "bamsignals")
+cran_pkg <- c("here", "dplyr", "readr", "tidyr", "ggplot2", "purrr", "forcats", "scales")
+
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
+suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
+
+```
+
+```{r ggplot aesthetics, echo=FALSE}
+## Plotting theme
+
+#for consistency..
+
+plot_theme <- theme_bw()
+
+barplot_theme <- plot_theme  + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size = 15),
+        axis.title = element_blank(),
+        legend.position = "none", 
+        axis.text.y = element_text(size = 15, face = "bold"),
+        axis.text.x = element_text(size = 13),
+        axis.ticks.y = element_blank(), 
+        axis.line.x = element_line(size = 0.2),
+        panel.border = element_blank())
+
+stacked.barplot_theme_2 <- plot_theme  + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size =20),
+        axis.text = element_text(size = 20),
+        axis.title = element_text(size = 25, face = "bold"),
+        axis.line.x = element_line(size = 0.25),
+        axis.line.y = element_line(size = 0.25),
+        legend.position = "bottom", 
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 15))
+
+boxplot_theme <- plot_theme  + 
+  theme(panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size =20),
+        axis.text.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.line.x = element_line(size = 0.25),
+        axis.line.y = element_line(size = 0.25),
+        panel.border = element_blank(),
+        legend.title = element_blank())
+
+strip_theme <- theme(strip.background = element_blank(),
+                    strip.switch.pad.wrap = unit(1, "lines"), 
+                    strip.text = element_text(size = 30, face = "bold.italic"))
+
+## Colors scheme for ENH class
+ENH_colors_light <- c("#fed439ff", "#709AE1", "#97a7b3")
+ENH_colors_dark <- c("#fec701", "#5787db", "#899ca9")
+```
+
+
+1. Run IPP with ENH sets (May 2021: shown at TAC)
+
+- half-life for gg6 -> mm10 was 50kb, half-life for mm10 -> gg6 was 30kb
+- loaded in IPP output into as tidy df with loadTidyIPP()
+- IPP-calculated distance score is thresholded by setting the distance of projection to (all) nearest anchor points using new function getIPPThreshold()
+- Projected coordinates are taken from direct projection when max distance is 1.5kb, and from djikstra projections when max distance is max 3kb and different from the direct projs. Distance over 3kb are considered (for now) NC, and coordinates taken from djikstra
+
+
+### IPP test (June 2021)
+```{r IPP data import & cleaning}
+
+# load ENH
+
+mENH <- loadBED4asDF(here("enhancer_sets", "e105h_ENH_final.bed"))
+gENH <- loadBED4asDF(here("enhancer_sets", "HH22h_ENH_final.bed"))
+
+# load CRUP projs
+
+mENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "mouse", "e105h_ENH_filt_from_atac.proj"))
+gENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "chicken", "HH22h_ENH_filt_from_atac.proj"))
+
+# get threshold for distance score based on max distance between proj and AP
+
+d50 <- 30000 #preset distance half-life
+max_distance_direct <- 1000 # within 1kb distance for direct projection
+max_distance_djikstra <- 2500 # within 3kb distance for djikstra projections
+
+# calculate threshold from set max distance(s)
+
+dir_cutoff <- getIPPThreshold(d50, max_distance_direct)
+dj_cutoff <- getIPPThreshold(d50,max_distance_djikstra)
+
+# get projected df based on thresholding 
+
+gENH_proj_df <- getProjCoordAsDF(gENH_ipp_df, dir_cutoff, dj_cutoff)
+mENH_proj_df <- getProjCoordAsDF(mENH_ipp_df, 
+                                 dir_cutoff,
+                                 getIPPThreshold(d50, 5200))
+
+
+
+# applies cutoff on all ranges 
+#gENH_gr_cutoff <- gENH_proj_gr[which(gENH_proj_gr$score >= 0.95)]
+# get projected ranges from called atac pks (after cut-off)
+# gENH_gr_cutoff <- mATAC[findOverlaps(mATAC, gENH_gr_cutoff, maxgap = 1000L)@from]
+
+
+```
+
+
+```{r Plot-chunk 1: IPP stats}
+## quick and dirty IPP stats (d50)
+
+ENH_count <- c(3012, 4181, 5647, 4745, 4082, 3581)
+ENH_class <- c("SC", "PC", "NC", "SC", "PC", "NC")
+ENH_sp <- c(rep("E10.5", 3), rep("HH22", 3))
+
+ENH_stats1 <- tibble(ENH_sp, ENH_class, ENH_count)
+ENH_stats1$ENH_sp <- factor(ENH_stats1$ENH_sp, 
+                           levels=c("HH22", "E10.5"))
+ENH_stats1$ENH_class <- factor(ENH_stats1$ENH_class, 
+                               levels = c("NC", "PC", "SC"))
+
+  ENH_stats1 %>% 
+    ggplot(aes(fill=factor(ENH_class), 
+               y=ENH_count, 
+               x=ENH_sp)) +
+    geom_bar(stat = "identity", 
+             color="#666666", position = position_fill(vjust = 0.5)) +
+    theme(axis.title.y = element_blank()) +
+    theme(axis.title.x = element_blank()) +
+    theme(axis.ticks.y = element_blank()) +
+    theme(axis.ticks.length = unit(0.25, "cm")) +
+    theme(axis.line.x = element_line(color = "black")) +
+    scale_fill_manual(values=ENH_colors_light[3:1]) +
+    coord_flip() +
+    theme(text = element_text(size = 30)) +
+    theme(panel.background = element_blank()) +
+    theme(legend.position = "bottom") +
+    theme(legend.title = element_blank())
+  
+  knitr::kable(ENH_stats1)
+  
+```
+
+
+```{r DEA-1: distance to ATAC}
+
+# converts proj df to GRanges. get projections in ranges of 500bp width 
+
+
+gENH_proj_gr <- IPPtoGRanges(gENH_proj_df, target_genome = "mm10")
+  export.bed(gENH_proj_BED, here("test", "gENH_proj_mm10_all.bed"))
+
+
+# load in called ATAC peaks
+
+mATAC <- import.bed(here("input_data", "atac-e105h_peaks.bed"))
+  mATAC <- getStandardChrom(mATAC, ref = "mm10")
+  
+gATAC <- import.bed(here("input_data", "atac-HH22h_peaks.bed"))
+  gATAC <- getStandardChrom(mATAC, ref = "galGal6")
+
+# get distance of all chick projections to nearest called mouse ATAC pks
+
+proj_to_ATAC_above <- distanceToNearest(gENH_proj_gr[which(gENH_proj_gr$score >= 0.95)], mATAC)
+
+proj_to_ATAC_below <- distanceToNearest(gENH_proj_gr[which(gENH_proj_gr$score < 0.95)], mATAC)
+
+distance_df <- tibble(distance_to_ATAC = c(mcols(proj_to_ATAC_above)[,1], 
+                                           mcols(proj_to_ATAC_below)[,1]),
+                      proj_group = c(rep("above", length(proj_to_ATAC_above)),
+                                     rep("below", length(proj_to_ATAC_below))),
+                      query_index = c(proj_to_ATAC_above@from, 
+                                      proj_to_ATAC_below@from))
+
+# plot distribution to ATAC from projection
+ distance_df %>% filter(distance_to_ATAC > 0) %>% 
+   ggplot(aes(x=distance_to_ATAC, fill = proj_group)) +
+  geom_histogram(alpha=0.5, position = 'identity') +
+  scale_fill_manual(values=c("#5787db", "#404080")) +
+  xlim(0, 20000) +
+  ylim(0,700)
+
+# summary stats 
+distance_df %>% 
+  group_by(proj_group) %>% filter(distance_to_ATAC > 100) %>% 
+  summarise(min = min(distance_to_ATAC),
+            mean = mean(distance_to_ATAC),
+            n = n())
+
+
+```
+
+
+### Test IPP thresholds with ENH sets (Sept 2021: shown at IRTG retreat)
+
+
+```{r Param Test: Load data}
+
+#####--- Load CRUP projs ---#####
+
+gENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "chicken", "HH22h_ENH_filt_from_atac.proj"))
+mENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "mouse", "e105h_ENH_filt_from_atac.proj"))
+
+
+#####--- Set threshold ---#####
+
+d50 <- 30000 #preset distance half-life
+
+dmax.bp <- c(500, seq(1000, 5000, by = 1000))
+    dmax.score <- purrr::map_dbl(dmax.bp, getIPPThreshold, dh = d50) # calculate threshold from set max distance(s)
+
+dmax_dir <- dmax.score[1] #set max distance for direct projection ~1kb
+
+#####--------- Get proj w cut off as GRanges --------- #####  
+
+##- Get projected df based on thresholding, loops over all dmax score 
+# keep the same threshold for both proj method
+# removes proj below cutoff
+  
+
+gENH_proj.GRlist <- lapply(dmax.score, function(d) {
+  proj.df <- getProjCoordAsDF(gENH_ipp_df, direct_thr = dmax_dir, dj_thr = d) %>% filter(score >= d)
+  proj.df <- distinct(proj.df, name, .keep_all = TRUE)  ## removes dups
+  proj.gr <- IPPtoGRanges(proj.df, target_genome = "mm10")
+  return(proj.gr)
+})
+    
+names(gENH_proj.GRlist) <- paste0(dmax.bp)
+
+
+  
+
+mENH_proj.GRlist <- lapply(dmax.score, function(d) {
+  proj.df <- getProjCoordAsDF(mENH_ipp_df, dmax_dir, d) %>% filter(score >= d)
+  proj.df <- distinct(proj.df, name, .keep_all = TRUE)  ## removes dups
+  proj.gr <- IPPtoGRanges(proj.df, target_genome = "galGal6")
+  return(proj.gr)
+})
+    
+names(mENH_proj.GRlist) <- paste0(dmax.bp)
+
+#save(gENH_proj.GRlist, mENH_proj.GRlist, file = here("processed", "proj_dtesting.Rdata"))
+
+save(gENH_proj.GRlist, mENH_proj.GRlist, file = here("processed", "proj_dmax_1_5kb.Rdata"))
+
+#####--------- Get proj w cut off as tidy df --------- #####
+
+gENH_proj.list <- lapply(dmax.score, function(d) {
+  proj.df <- getProjCoordAsDF(gENH_ipp_df, direct_thr = dmax_dir, dj_thr = d) %>% filter(score >= d)
+  proj.df <- distinct(proj.df, name, .keep_all = TRUE)  ## removes dups
+  return(proj.df)
+})
+    
+    names(gENH_proj.list) <- paste0(dmax.bp)
+
+mENH_proj.list <- lapply(dmax.score, function(d) {
+  proj.df <- getProjCoordAsDF(mENH_ipp_df, dmax_dir, d) %>% filter(score >= d)
+  proj.df <- distinct(proj.df, name, .keep_all = TRUE)  ## removes dups
+  return(proj.df)
+})
+    
+names(mENH_proj.list) <- paste0(dmax.bp)
+
+
+#save(gENH_proj.list, mENH_proj.list, file = here("processed", "proj_dtesting_df.Rdata"))
+save(gENH_proj.list, mENH_proj.list, file = here("processed", "proj_dmax_1_5kb_df.Rdata"))
+
+```
+
+
+
+```{r Test d params-counts, eval=FALSE}
+
+#! Code will be run on server /project/MDL_Ibrahim/MP_all/enhancers_analysis/scripts/d3000_counts.R
+
+h10.bamf  <- list.files(here("data", "bam", "e105h", "rep1"), pattern = ".bam$", full.names = TRUE) %>%
+        setNames(gsub(".bam$", "", basename(.)))
+
+getIPPbam <- function(bam, gr, target_genome) {
+
+  bf  <- names(which(bam.list == bam)); print(bf)
+
+  # filter chroms
+  gr <- getStandardChrom(gr, ref = target_genome)
+
+  # get count as vector
+  if (target_genome == "mm10") { #SE BAM
+    sigs <- sapply(bamProfile(bampath = bam,
+    gr = gr,
+    binsize = width(gr[1]),
+    shift = 100,
+    mapqual = 10, filteredFlag = 1024, ss = F, verbose =F)@signals,
+    function(x) x)
+    } else { #PE BAM
+    sigs <- sapply(bamProfile(bampath = bam,
+    gr = gr,
+    binsize = width(gr[1]),
+    paired.end = "midpoint",
+    mapqual = 10, filteredFlag = 1024, ss = F, verbose = F)@signals,
+    function(x) x)
+    }
+    return(sigs)
+  }
+
+gr.list  <- lapply(gENH_proj.GRlist, function(x) {
+  x <- x[which(x$cons.gr == "PC")]
+  x <- resize(x, fix="center", width = 1000)})
+
+bam.list  <- h10.bamf
+count.list <- lapply(h10.bamf, function(x){
+  r <- mclapply(gr.list,
+        ¦       ¦  getIPPbam,
+        ¦       ¦  bam = x,
+                ¦  target_genome = "mm10", mc.cores = 4)
+})
+
+
+names(count.list)  <- c("H3K27AC", "H3K27ME3", "H3K4ME1", "H3K4ME3")
+
+```
+
+```{r Test param viz-1: basic count}
+
+#####--------- Make input df for plotting --------- #####
+
+# stacked barplot for each dmax
+# convert to df as input
+
+p1.df <- lapply(names(gENH_proj.list), function(x) {
+  count.x <- gENH_proj.list[[x]] %>% group_by(gr) %>% tally() %>% mutate(dmax = as.numeric(x), sp = "Chicken")
+}) ; p1.df <-dplyr::bind_rows(p1.df)
+
+p1.df.m <- lapply(names(mENH_proj.list), function(x) {
+  count.x <- mENH_proj.list[[x]] %>% group_by(gr) %>% tally() %>% mutate(dmax = as.numeric(x), sp = "Mouse")
+}) ; p1.df.m <-dplyr::bind_rows(p1.df.m)
+
+p1.df <- rbind(p1.df, p1.df.m); rm(p1.df.m) ## merge into 1 df 
+
+#####--------- Plot --------- #####
+
+p1 <- p1.df %>% ggplot(aes(fill=factor(gr), 
+               y=n, 
+               x=factor(dmax))) +
+    geom_bar(stat = "identity", 
+             color="#666666", position = "stack") +
+    geom_text(stat="identity", 
+              #aes(label=n), 
+              aes(label = ifelse(gr == "SC" & dmax !=500, "", n)),
+              position = position_stack(vjust = 0.5), size = 6) +
+    scale_y_continuous(expand = c(0, 0),
+                       name = "no. ENH per class", n.breaks = 3) + 
+    xlab("Distance threshold(bp)") +
+    scale_fill_manual(values=ENH_colors_light[c(2,1)]) + 
+    facet_wrap(vars(sp), ncol = 2) +
+    stacked.barplot_theme_2 + 
+    strip_theme +
+    theme(panel.spacing = unit(6, "lines"), 
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none", 
+          axis.title = element_text(size = 30, face = "bold"),
+          axis.title.x = element_blank()) 
+
+```
+
+
+```{r Test param viz-2: ATAC pk distance}
+
+# load in called ATAC peaks
+
+mATAC <- import.bed(here("input_data", "ATAC", "atac-e105h_peaks.bed"))
+  mATAC <- getStandardChrom(mATAC, ref = "mm10")
+
+  
+gATAC <-   import.bed(here("input_data", "ATAC", "atac-HH22h_peaks.bed"))
+  gATAC <- getStandardChrom(gATAC, ref = "galGal6")
+
+  # get distance of all chick projections to nearest called ATAC pks
+
+p2.df <- lapply(names(gENH_proj.GRlist), function(x){
+  gENH_proj.GRlist[[x]]$distance <- mcols(distanceToNearest(gENH_proj.GRlist[[x]], mATAC))$distance
+  p2 <- data.frame(mcols(gENH_proj.GRlist[[x]])[c("ref", "cons.gr", "distance")])
+  p2 <- p2 %>% mutate(dmax = as.numeric(x), sp = "gE_mA")
+}); p2.df <- dplyr::bind_rows(p2.df)
+
+p2.df.2 <- lapply(names(mENH_proj.GRlist), function(x){
+  mENH_proj.GRlist[[x]]$distance <- mcols(distanceToNearest(mENH_proj.GRlist[[x]], gATAC))$distance
+  p2 <- data.frame(mcols(mENH_proj.GRlist[[x]])[c("ref", "cons.gr", "distance")])
+  p2 <- p2 %>% mutate(dmax = as.numeric(x), sp = "mE_gA")
+}); p2.df.2 <- dplyr::bind_rows(p2.df.2)
+
+p2.df <- rbind(p2.df, p2.df.2); rm(p2.df.2)
+
+p2.df$cons.gr <- factor(p2.df$cons.gr)
+
+####--- plot distance to ATAC pks ---#####
+
+p2.1 <- p2.df %>%  
+  ggplot(aes(y = distance, x = factor(dmax), fill = fct_rev(cons.gr))) + 
+  geom_boxplot() +
+  scale_y_continuous(expand = c(0,0), limits = c(-1000, 3000), 
+                     name = "distance to nearest \n ATAC peak (bp)") +
+  scale_fill_manual(values=ENH_colors_light[c(1,2)]) + 
+  facet_wrap(vars(sp), nrow = 1) +
+  xlab("Distance threshold (bp)") +
+  boxplot_theme +
+  strip_theme +
+    theme(panel.spacing = unit(6, "lines"), 
+          panel.border = element_rect(size = 0.5, fill = NA),
+          plot.margin = margin(1,1,1,1, unit = "lines"),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title = element_text(size = 30, face = "bold"),
+          legend.position = "none",
+          strip.text = element_blank())
+
+####--- plot proportion of projections <= 1kb (mG) or <= 2kb (gM) ---#####
+
+p2.df <- p2.df %>% 
+  mutate(gr2 = case_when(sp =="gE_mA" & cons.gr == "PC" & distance >= 2000 ~ "PC(-)",
+                         sp =="mE_gA" & cons.gr == "PC" & distance >= 1000 ~ "PC(-)",
+                         cons.gr == "PC" ~ "PC", 
+                         TRUE ~ "SC"))
+
+p2.df$gr2 <- factor(p2.df$gr2, levels = c("PC(-)", "PC", "SC"))
+
+p2.3 <- p2.df %>% group_by(sp, dmax) %>% 
+  count(gr2) %>% 
+  ungroup() %>% 
+  ggplot(aes(fill=gr2, 
+               y=n, 
+               x=factor(dmax))) +
+    geom_bar(stat = "identity", 
+             color="#666666", position = "stack") +
+    geom_text(stat="identity", 
+              #aes(label=n), 
+              aes(label = ifelse(gr2 == "SC" & dmax !=500, "", n)),
+              position = position_stack(vjust = 0.5), size = 6) +
+    scale_y_continuous(expand = c(0, 0),
+                       name = "no. ENH per class", n.breaks = 3) + 
+    xlab("Distance threshold(bp)") +
+    scale_fill_manual(values=c("#c0d2f2", ENH_colors_light[2:1])) + 
+    facet_wrap(vars(sp), ncol = 2) +
+    stacked.barplot_theme_2 + 
+    strip_theme +
+    theme(panel.spacing = unit(6, "lines"), 
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.text = element_blank(),
+          axis.title = element_text(size = 30, face = "bold"),
+          axis.title.x = element_blank()) 
+
+
+
+
+
+
+  
+  
+
+
+
+```
+
+```{r Test param viz-3: histone sigs around proj}
+
+#####-- gENH proj --#####
+# only plotting PC projs (500-5000)
+# load sigs/read counts 
+
+load(here("RData", "gENh_proj_bamcounts.RData"))
+
+### count.list of length 4, each containing 6 nested lists of each dmax
+
+## unlist 1
+# names of list now = [histone].[dmax]
+
+count_wide <- unlist(count.list, recursive = F) #list of 24
+
+tidy_count <- map_dfr(names(count_wide), function(x){
+  tibble(sig = count_wide[[x]], 
+         col=rep(x, length(count_wide[[x]]))) %>% 
+    separate(col, into = c("histone_mark", "dmax"))
+})
+  
+tidy_count$dmax <- factor(as.numeric(tidy_count$dmax))
+
+# max-min normalize counts for each histone marks
+tidy_count <- tidy_count %>% group_by(histone_mark) %>% 
+  mutate(sigx = round(rescale(sig, to = c(0,1)), digits = 3))
+
+p3.1 <- tidy_count %>% 
+  ggplot(aes(x = dmax, y = sigx, fill = histone_mark)) +
+  geom_boxplot() +
+  facet_wrap(~factor(histone_mark), ncol = 1) +
+  scale_y_log10(name = "Normalized read count") +
+  xlab("Distance threshold (bp)") +
+  boxplot_theme + strip_theme +
+  theme(legend.position = "none")
+
+
+```
+
+
+Extract data only for dmax = 3000, w distance to ATAC pk in target as filter 
+
+```{r Example for dmax = 3000}
+
+
+
+
+```
+
+
+
+```{r DUMP }
+
+library(ggridges)
+
+ggplot(p2.df, aes(y = fct_rev(fct_inorder(dmax)))) +
+  geom_density_ridges(aes(x = distance, fill = factor(cons.gr)), alpha = 0.8,
+                      scale = 3) +
+   coord_cartesian(xlim = c(0, 1e+04)) +
+  scale_fill_manual(values=ENH_colors_light[c(2,1)]) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0))
+
+
+p2.df <- p2.df %>% 
+  mutate(dmax_cutoff = case_when(sp == "gE_mA" & distance <= 2000  ~ "within",
+                                 sp == "mE_gA" & distance <= 1000  ~ "within",
+                                 TRUE ~ "out"))
+
+# plot mirrored proportions
+#https://homepage.divms.uiowa.edu/~luke/classes/STAT4580-2020/proportions.html#raw-data
+
+p2.df.agg <- p2.df %>% group_by(sp, cons.gr, dmax) %>% count(dmax_cutoff) %>%
+  mutate(pr = n*100 / sum(n))
+
+
+p2.2 <-  p2.df.agg %>%
+  filter (dmax_cutoff == "under") %>%
+  ungroup() %>%
+  ggplot(aes(x = fct_rev(factor(dmax)), fill = factor(cons.gr),
+             y = ifelse(cons.gr == "PC", pr, -pr)))+
+  geom_col(color = "#5F5F5F") +
+  geom_hline(yintercept = 0) +
+   facet_wrap(~sp) +
+  coord_flip() +
+  scale_fill_manual(values=ENH_colors_light[c(2,1)]) +
+  scale_y_continuous(limits = c(-50, 50),
+                     labels = function(x) scales::percent(abs(x / 100))) +
+  boxplot_theme +
+  xlab("Distance threshold (bp)") + ylab("% Proj. within 1-2kb of ATAC peak") +
+  strip_theme +
+    theme(panel.spacing = unit(6, "lines"),
+          panel.border = element_rect(size = 0.5, fill = NA),
+          plot.margin = margin(1,1,1,1, unit = "lines"),
+          axis.title = element_text(size = 30, face = "bold"),
+          strip.text = element_blank())
+
+
+```
+
+
+
+
+
+
+
