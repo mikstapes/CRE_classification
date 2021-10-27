@@ -1,275 +1,518 @@
 ---
-title: "Enhancers filtering"
+title: "enhancer_calling_updated"
+author: "Mikie Phan"
+date: "07/2021"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(fig.width=6, fig.height=6, dpi = 300, message = FALSE)
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
 
 ```
 
-## Description
+```{r load_libs, results='hide'}
 
-Notes to get a final set of HH22 heart enhancers after [CRUP](https://github.com/VerenaHeinrich/CRUP)
-prediction, with inspiration from Tobi
+bioc_pkg <- c("GenomicFeatures", "rtracklayer", "TxDb.Mmusculus.UCSC.mm10.knownGene", 
+              "GenomicAlignments", "Rsamtools")
+cran_pkg <- c("here", "dplyr", "readr", "tidyr", "ggplot2")
 
-```{r Load pkgs & txdb, results='hide'}
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
+suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
 
 library(here)
+source(here("R", "functions.R"))
 
-bioc_pkg <- c("GenomicFeatures", "rtracklayer", "ChIPpeakAnno", "seqsetvis")
+```
+
+
+## Enhancer calling updates
+
+1. Defining promoter regions
+  - currently it's TSS annotated from UCSC ncbiRefseq (galGal6) or knownGene (mm10). For mouse that works well enough, but for chicken a lot of the TSS are not annotated, trying to build Txdb obj from other sources like ensembl here for comparisons
+  - incorporate H3k4m3 data with either eHMM, which may need a new training set, or chromHMM
+  
+```{r build_ensembl_Txdb,eval=FALSE}
+
+#install.packages("RMariaDB") requires RMariaDB for interfacing to MySQL databases
+
+txdb_esbl <- GenomicFeatures::makeTxDbFromEnsembl(organism = "Gallus gallus",
+                                               server = "ensembldb.ensembl.org",
+                                               username = "anonymous", port = 5306)
+
+prom_esbl <- GenomicFeatures::promoters(txdb_esbl, upstream = 1000, downstream = 200)
+
+
+# compare to UCSC txdb obj
+
+txdb_ucsc <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+
+prom_ucsc <- trim(GenomicFeatures::promoters(txdb_ucsc, upstream = 1000, downstream = 200))
+
+# Export for viz on a browser
+export.bed(prom_ucsc, here("test", "prom_ucsc.bed"))
+```
+
+- Turns out the UCSC/NCBI Refseq annotations are much better than Ensemble.
+- Options
+  + Prom = TSS(-1kb/200bp) + K4me3 peaks (?)
+  + Prom = chromHMM annotations?
+
+```{r get_proms_from_TSS}
+mm10_txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
+mm10_txdb <- getStandardChrom(mm10_txdb, ref = "mm10")
+mm10_prom <- unique(trim(promoters(mm10_txdb, upstream = 1000, downstream = 200)))
+
+export.bed(mm10_prom, here("test", "mm10_prom.bed"))
+
+gg6_txdb <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+gg6_txdb <- getStandardChrom(gg6_txdb, ref = "galGal6")
+gg6_prom <- unique(trim(promoters(gg6_txdb, upstream = 1000, downstream = 200)))
+
+ref <- c("mm10", "galGal6")
+TSS <- c(length(unique(transcripts(mm10_txdb))), 
+         length(unique(transcripts(gg6_txdb))))
+prom <- c(length(mm10_prom), length(gg6_prom))
+
+prom_df <- tibble(ref, TSS, prom)
+
+knitr::kable(prom_df)
+
+```
+
+
+2. Tweaking CRUP parameters for comparable ENH counts
+
+At the moment there are 18k+ E105h ENH and 9k+ HH22h ENH. This massive difference comes from the difference in CRUP predictions where there are ~2x as many predictions for E105h. This comes from bad staging matching, after correcting this, the # of filtered 'distal' enhancers =~ 13k+
+
+One way I want to improve the incorporation of ATAC data is to take the predicted output from crup (GR obj consisting of 100bp bins + calculated prob) and take those which overlaps with either (1) genrich called peaks (2 reps, ext size = 100 to get NFR regions) or (2) NFR regions extracted from bam files with norm counts at least 3-fold enriched over local background <- nope not doing this. 
+
+```{r CRUP_adjust_1, eval=FALSE}
+
+# load atac peaks (2 reps, genrich -d 100)
+
+atac <- import.bed(here("input_data", "atac-HH22h_peaks.bed"))
+  atac_distal <- atac[!overlapsAny(atac, gg6_prom)]
+
+# load crup bins with calculated probability 
+gcrup <- readRDS(here("input_data", "crup", "crup_22h_bins.rds"))
+cutoff <- 0.5
+
+# get all bins over cutoff prob as 'peaks'
+
+crup_pks <- gcrup[which(gcrup$prob > cutoff )]
+
+# get all 100bp bins overlapping atac pks outside proximal region
+
+pks_filt <- pks[findOverlaps(pks, atac_distal, maxgap = 250)@from]
+
+# create 1100 pks regions (windows N = 5)
+
+start(pks_filt) <- start(pks_filt) - 500
+width(pks_filt) <- 1100
+
+## final peak set (sort and merge like CRUP)
+
+# split bins into individual chroms for sorting by calculate prob and merging
+
+out <- mclapply(split(pks_filt, seqnames(pks_filt)),
+                sort_peaks,
+                mc.cores = 10)
+
+# merged all chroms into a single gr containing 1100bp candidate ENH regions
+out <- do.call("c", unname(out))
+
+# remove 1100 bins at promoters
+#out_final <- sort(out)[!overlapsAny(out, gg6_prom)]
+
+
+# write to bed
+rtracklayer::export(out, here("enhancer_sets", "HH22h_enh_from_crup.bed"))
+
+```
+
+Filtered ENH taking from ATAC or from CRUP may differ in numbers, but they all overlap one another.  Taking CRUP coordinates to have predicted candidates with equal length. 
+
+```{r Table_stats, echo=FALSE}
+
+out_atac <- import.bed(here("enhancer_sets", "HH22h_enh_from_ATAC.bed"))
+
+# Stats from filtering bins by ATAC overlap 
+gr_count <- c(length(gg6_prom), length(atac), length(atac_distal),
+              length(out), length(out_atac))
+gr_label <- c("Promoters", "ATAC peaks", "ATAC peaks(distal)", 
+               "CRUP 1100bp ENH (final)", "ATAC pks(distal) with CRUP")
+gr_bins_with_atac_filt <- tibble(gr_label, gr_count)
+
+knitr::kable(gr_bins_with_atac_filt)
+
+
+# Plot stats
+
+gr_list <- list(Promoters = tss,
+                ATAC_pks = atac,
+                ATAC_pks_distal = atac_distal,
+                CRUP_pks = pks_filt_all,
+                ENH_candidates = out)
+
+
+upset_mat <- make_comb_mat(gr_list)
+
+
+```
+
+
+### 10-08-21: Get ENH as ATAC peak summit. 
+
+Same as before but center CRUP ENH by ATAC peaks/summit
+
+```{r TEST: Get ENH as ATAC}
+# load txdb
+
+# gg6_txdb <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+# gg6_txdb <- getStandardChrom(gg6_txdb, ref = "galGal6")
+# gg6_prom <- unique(trim(promoters(gg6_txdb, upstream = 1000, downstream = 200)))
+
+#load promoters
+gg6_prom <- import.bed(here("promoters_calling", "HH22h_promoters.bed"))
+
+##-- Loading ATAC narrowPeak 
+
+gATAC <- import(here("input_data", "ATAC", "atac-HH22h_pks.narrowPeak"),
+                format = "narrowPeak", 
+                genome = "galGal6")
+gATAC <- getStandardChrom(gATAC, ref = "galGal6")
+
+atac_distal <- gATAC[!overlapsAny(gATAC, gg6_prom)]
+  atac_test <- atac_distal[which(seqnames(atac_distal) == "chr4")]
+  
+##-- Codes from Chunk 5, loading crup predictions
+
+# load crup bins with calculated probability 
+
+gcrup <- readRDS(here("input_data", "crup", "crup_22h_bins.rds"))
+cutoff <- 0.5
+
+# get all bins over cutoff prob 
+
+gcrup <- gcrup[which(gcrup$prob > cutoff)]
+
+#get those overlapping with ATAC peaks (distal), with max 250bp in gap 
+
+gcrup_filt <- gcrup[findOverlaps(gcrup, atac_distal, maxgap = 250)@from]
+
+
+
+#test 500bp ENH
+
+enh_size <- 1100
+
+#extend_count <- 2
+
+# gcrup_filt <- resize(gcrup_filt, fix = "center", 
+#                      width = 2*100*extend_count + 100)
+
+gcrup_filt <- resize(gcrup_filt, fix = "center", 
+                     width = enh_size)
+
+  gcrup_test <- gcrup_filt[which(seqnames(gcrup_filt) == "chr4")]
+
+out_test <- sort_crup_bin(gcrup_test)
+out_test <- sort(out_test)
+  #names(out_test) <- paste0("chr4_ENH_", seq_len(length(out_test)))
+
+# Get GR of just peak summit
+#GRanges is 1-based vs 0-based NarrowPeak
+
+      <- atac_test[overlapsAny(atac_test, out_test, maxgap = 100)]
+
+  export.bed(atac_test_filt, here("test", "enh_from_atac_gg6_chr4_w_called_proms.bed") )
+
+atac_summit_test <- GRanges(seqnames = seqnames(atac_test),
+                        ranges = IRanges(start = start(atac_test) + atac_test$peak-1,
+                                         width = 1),
+                        strand = strand(atac_test), 
+                        name = atac_test$name,
+                        pVal = atac_test$pValue)  
+  
+
+enh_length <- c(500, 700, 900, 1100)
+
+get_dups_count <- function(peaks, size, crup.gr, gap){
+  
+  peaks <- resize(peaks, fix = "center", width = size)
+  
+  # get dups idx
+  
+  if (gap == TRUE) atac.hits <- findOverlaps(peaks, atac.gr, maxgap = 100)@to
+  if (gap == FALSE) atac.hits <- findOverlaps(peaks, atac.gr)@to
+    
+  atac_dups_idx <- atac.hits[which(duplicated(atac.hits))]
+  
+  # count ENH overlapping
+  dups_count <- sum(countOverlaps(atac.gr[atac_dups_idx], peaks, maxgap = 100))
+  
+  dups_stats <- tibble(length(peaks), dups_count)
+  
+  return(dups_stats)
+  
+}
+
+  
+#export.bed(out_test, here("test", "chr4_ENH_500bp.bed"))
+
+  
+  
+
+
+# export.bed(atac_test, here("test", "chr4_atac_dist.bed"))
+
+
+#get hit obj + distance from any called enh to an ATAC peak
+
+# dist <- distanceToNearest(out_test, atac_test)
+
+
+
+
+
+```
+
+
+Code to call ENH, not export it but report how many ENH are overlapping one another if center by overlapping/neighboring ATAC pks depending on their set width. 
+
+Input: CRUP bins, ATAC narrowPeak from genrich, Promoter regions, and differing ENH sizes
+Output: table with #of overlapping ENH + plot
+
+
+```{r Test ENH sizes}
+
+library(here)
+source(here("scripts", "functions.R"))
+
+args <- commandArgs(trailingOnly=T)
+if (length(args) != 5) stop('Usage: ./get_enh_set.R <genome_build> <atac_peaks.narrowPeak> <crup_predictions.rds> <outdir/> <sample_name>')
+
+bioc_pkg <- c("GenomicFeatures", "rtracklayer")
 tidy_pkg <- c("ggplot2", "tidyr", "dplyr", "readr")
 
-suppressMessages(lapply(bioc_pkg, require, character.only = TRUE)) 
-suppressMessages(lapply(tidy_pkg, require, character.only = TRUE))
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
+suppressMessages(lapply(tidy_pkg, library, character.only = TRUE))
 
-#Load pre-generated txdb obj for galGal6, created using ncbi 'all' gene sets to include not-yet curated mef2c
-gg6_txbd <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
-  gg6_txbd <- keepStandardChromosomes(gg6_txbd, pruning.mode="coarse")
+genomes <- c("mm10", "hg38")
 
+suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
+suppressMessages(lapply(tidy_pkg, library, character.only = TRUE))
 
-```
+##---Parsing inputs
 
-## Goal/Approach
-Take ATAC peaks (macs2, no model from BEDPE), overlap with CRUP output (single enhancers), and remove those 1kb *uptream* and 100bp *downstream* of TSS/promoter.
+ref_genome <- args[1]
 
-ATAC peaks included in analysis (for now) is _naive_ overlap, i.e. no IDR, between peak sets (BED3) of 2 bio replicates, taken from calling bedtools intersect
+atac <- import(args[2],
+               format = "narrowPeak",
+               genome = ref_genome)
 
-`bedtools intersect -a rep1.narrowPeak -b rep2.narrowPeak -wa -f 0.5 > overlap.bed`
+crup <- readRDS(args[3])
 
-*TSS/promoter = +1kb/-200bp region around TSS (start of transcrips from TxDb)
-*Enhancers = ATAC peaks overlapping CRUP enhancers and non-overlapping TSS/promoter 
 
-```{r Get enhancers, warning=FALSE, results='hide'}
+##---- Load txdb, input data & filter only standard chroms (autosomes + chrX or chrZ(gg))
 
-# Import data as GRranges obj with rtracklayer
-crup_g <- import.bedGraph(here("input_data/get_enhancers", "CRUP_HH22h_r1.bedGraph"))
-  names(crup_g) <- paste0("crup_", seq_len(length(crup_g)))
-
-atac_g <- import.bed(here("input_data/get_enhancers", "atac_22h_pk.bed"))
-  names(atac_g) <- paste0("atac-pks_", seq_len(length(atac_g)))
-  ## Only keep 'standard' chromosomes, i.e. autosomes and chrW & chrZ
-  seqlevels(atac_g, pruning.mode="coarse") <- seqlevels(seqinfo(atac_g))[grep("^chr[0-9]{,2}$|chrW$|chrZ$", seqlevels(seqinfo(atac_g)))]
-
-  
-  
-
-# Define TSS/prom
-tss <- GenomicFeatures::promoters(gg6_txbd, upstream = 1000, downstream = 100)
-  tss <- trim(tss)  #trim 6 out of bound tss/promoters
-  unique_tss <- granges(tss[!duplicated.GenomicRanges(tss)])
-  
-# Get enhancers
-atac_distal <- atac_g[!overlapsAny(atac_g, unique_tss)] #length=40356. 40197(std chrom)
-enhancers <- atac_distal[overlapsAny(atac_distal, crup_g, maxgap = 250)] #6236(gap=250)
-    
-    # Export distal enhancers as bed file
-    #export.bed(enhancers, here("bed-outfiles", "get_enhancers", "HH22h_enhancer_distal_standard_chrom.bed"))
-
-```
-
-## Quick stats
-
-```{r Viz-seqsetviz, warning=FALSE, results='hide', eval=FALSE}
-
-ol_atac <- findOverlapsOfPeaks(atac_g, atac_distal, enhancers, 
-                               connectedPeaks = "keepAll")
-
-makeVennDiagram(ol_atac, 
-                NameOfPeaks = c("ATAC.2rep", "ATAC.distal", "Enhancers"))
-
-enh_filt_olaps <-  ssvOverlapIntervalSets(GRangesList(ATAC=atac_g, 
-                                                      CRUP.enhancers=crup_g, 
-                                                      Promoters_TSS=unique_tss))
-
-ssvFeatureVenn(enh_filt_olaps)
-
-```
-
-
-
-## Importing projected enhancers
-
-Filtered ATAC peaks as enhancers were projected on molgen cluster using [IPP](https://github.molgen.mpg.de/zehnder/genomic_projection.git)
-
-```{bash IPP-call, eval=FALSE, warning=FALSE, message=FALSE, results=FALSE}
-#! /bin/bash
-
-root=$(realpath .)
-
-export PATH=$root/genomic_projection/IPP:$PATH
-
-project_regions.sh \
-        $root/data/bed/HH22h_enhancer_distal.bed \
-        galGal6 \
-        mm10 \
-        50000 \
-        $root/pwaln_pyarrow_mm10_to_galGal6.pkl \
-        10 2> IPP_g2m_log.2
-```
-
-```{r IPP import& bed export, warning=FALSE, message=FALSE}
-
-## Write this to function for future use!!
-enh_proj <- read_tsv(here("input_data/get_enhancers", "HH22h_enhancer_proj.bed"), col_names = FALSE)
-enh_proj <- enh_proj %>% select(name=X1, 
-                            ref=X2, 
-                            coords_direct=X3,
-                            coords_djikstra=X4,
-                            score_direct=X5, 
-                            score_djikstra=X6,
-                            bridging_species=X15) %>% 
-                                    pivot_longer(cols = starts_with("score"), 
-                                    names_to = "proj_method", 
-                                    names_prefix = "score_", 
-                                    values_to = "distance_score")
-
-
-## Get thresholded proj using distance score >=0.97
-enh_proj_ipp <- enh_proj %>% 
-  filter(proj_method=="djikstra" & distance_score >=0.975) %>%
-  select(name, coords_djikstra) %>% 
-  tidyr::separate(coords_djikstra, into = c("chrom_proj", "center_proj"), sep = ":")
-
-  enh_proj_ipp$center_proj <- as.numeric(enh_proj_ipp$center_proj)
-
-## Extend +/- 250bp from projected center for easy viz
-enh_proj_ipp<- enh_proj_ipp %>% 
-  mutate(offset=250,  
-         start_proj=center-offset, 
-         end_proj=center+offset)
-
-#sort IPP df by chr
-# chr_order <- c(paste("chr",1:33,sep=""),"chrZ")
-# enh_proj_ipp$chrom <- factor(enh_proj_ipp$chrom, levels = chr_order)ß
-
-
-
-
-
-
-
-```
-
-
-```{r BED export}
-# enh_proj_df <- enh_proj_ipp %>% arrange(chrom, start) %>% select(chrom, start, end, name) #sort bed
-
-###---------write color-coded BED for track viz (galGal6)---------###  
-
-# convert atac peaks and filterd enhancers as GRanges to df
-atac_pks_filt <- list(atac=atac_g, enh=enhancers)
-atac_pks_filt_df <- lapply(atac_pks_filt, makeDFfromGranges)
-
-# append IPP df
-atac_pks_filt_df <- c(atac_pks_filt_df, list(enh.ipp=enh_proj_ipp))
-
-enh_bed <- atac_pks_filt_df$atac
-
-# specific if atac pks were enhancers and/or projected or not 
-enh_bed <- enh_bed %>% mutate(enhancer=name %in% atac_pks_filt_df$enh$name, 
-                              ipp.enhancer=name %in% atac_pks_filt_df$enh.ipp$name)
-
-# write to BED 
-# all HH22 atac peaks, with enhancers and projected enhancers color coded 
-
-enh_bed %>% mutate(score=0, 
-                  strand=".", 
-                  tsrt=start, 
-                  tend=end, 
-                  color=case_when(enhancer== TRUE & ipp.enhancer == TRUE ~ "87,31,78", 
-                                  enhancer== TRUE & ipp.enhancer == FALSE ~ "79,117,155",
-                                  TRUE ~ "146,201,177")) %>% 
-  select(-enhancer, -ipp.enhancer) %>% 
-  write_tsv(here("processed", "get_enhancers", "HH22h_enhancers_proj_colored.bed"), col_names = FALSE)
-
-##
-
-## Write BED (for mm10) ##
-
-enh_proj_ipp %>% arrange(chrom, start) %>% 
-  select(chrom, start, end, name) %>% 
-  write_tsv(here("processed", "get_enhancers", "HH22h_proj_enh_mm10.bed"), col_names = FALSE)
-
-
-
-
-
-
-
-
-```
-
-
-
-
-## Functions
-
-```{r FUNCTIONS, warning=FALSE, message=FALSE}
-
-##Granges is 1-based and BED is 0-based
-makeDFfromGranges <-  function(gr) {
-  df <-  tibble(chrom=as.character(seqnames(gr)),
-                start=start(gr)-1,
-                end=end(gr)-1, 
-                name=names(gr))
-  return(df)
+if (ref_genome %in% genomes) {
+  if (ref_genome == "mm10") pkg <- "TxDb.Mmusculus.UCSC.mm10.knownGene"
+  if (ref_genome == "hg38") pkg <- "TxDb.Hsapiens.UCSC.hg38.knownGene"
+  suppressMessages(require(pkg, character.only = TRUE))
+  assign("txdb", eval(parse(text = pkg)))
+  txdb <- getStandardChrom(txdb, ref = ref_genome)
+  atac <- getStandardChrom(atac, ref = ref_genome)
+} else if (ref_genome=="galGal6") {
+  txdb <- loadDb("/project/MDL_Ibrahim/MP_all/annotations/gg6/TxDb.galGal6.ncbiRefseq.sqlite")
+  txdb <- getStandardChrom(txdb, ref = ref_genome)
+  atac <- getStandardChrom(atac, ref = ref_genome)
+} else {
+  stop('genome not supported')
 }
 
-get_standard_chroms <- function(gr, pruning.mode="coarse") {
-  si <- seqinfo(gr)
-  seqlevels(gr, pruning.mode = "coarse") <-seqlevels(si)[grep("^chr[0-9]{,2}$|chrX$|chrZ$",
-                                                               seqlevels(si))]
-  return(seqlevels(gr))
+##--- Define TSS/promoters from TxDb
+
+tss <- GenomicFeatures::promoters(txdb, upstream = 1000, downstream = 200)
+tss <- trim(tss)  #trim 6 out of bound tss/promoters
+tss <- granges(tss[!duplicated.GenomicRanges(tss)])
+
+##--- Get 'distal' atac peaks
+
+atac_distal <- atac[!overlapsAny(atac, tss)] 
+
+##--- Load crup bins over cutoff prob as 'peaks'
+
+cutoff <- 0.5
+
+pks_all <- crup[which(crup$prob > cutoff)]
+
+# get all bins overlapping 'distal' atac pks
+
+pks_distal <- pks_all[findOverlaps(pks_all, atac_distal, maxgap = 250)@from]
+
+#compare ENH sizes, export stats as tsv
+
+# pre-set different sizes for ENH
+enh.width <- c(500, 700, 900, 1100)
+
+# empty vector and tibble for loops to fill in 
+count <- numeric(length(enh.width))
+dups_count <- numeric(length(enh.width))
+dups_df <- tibble(count, dups_count)
+
+# for each set enh size/width, calculate # called ENH, and # of dups
+
+for (i in seq_along(enh.width)) {
+  
+  # resize 
+  pks_out <- resize(pks_distal, fix = "center", width = enh.width[i])
+  
+  # parallel sort by descending score and merge by overlap
+  pks_out <- mclapply(split(pks_out, seqnames(pks_out)),
+                         sort_peaks,
+                         mc.cores = 8)
+  
+  # re-combine split gr into a single gr
+  pks_out <- do.call("c", unname(pks_out))
+    pks_out <- sort(pks_out)
+  
+  # get dups stats df
+  dups_df[i,] <-  get_dups_count(peaks = pks_out, 
+                                 size = enh.width[i], 
+                                 atac.gr = atac_distal,
+                                 gap = TRUE)
 }
+
+## writes the number of ENH: total, dups, final (no dups)
+mutate(dups_df, final.count = count - dups_count/2) %>% 
+  write_tsv(paste0(args[4], args[5], "_ENH_size_overlap_stats.tsv"))
+
+
 ```
 
+  
+ ### Get promoters
+ 
+```{r get promoter code dump}
+# get unique isoforms
+
+## counts gr after summarizeOverlaps(tx_prom, RNA.bamfiles)
+
+load(here("test", "prom", "hh22_chr4_counts_prom.RData"))
 
 
-## Other notes
+#test gr to get unique (and longest) isoforms for each transcripts based on TSS overlaps and similar length
+# Tx_with_active_prom <- tx2_prom[850:860]
+# 
+# i <- 0
+# while (length(Tx_with_active_prom) > i + 1){
+#   
+#   i <- i + 1
+#   overlap.to.idx <- findOverlaps(resize(Tx_with_active_prom[i], width = 100, fix = "start"),
+#                                  Tx_with_active_prom)@to
+#   
+#   if (length(overlap.to.idx) == 1) next
+#   
+#   # keep only those with ~same length
+#   keep.length.idx <- which(ceiling(Tx_with_active_prom[overlap.to.idx]$length) == ceiling(Tx_with_active_prom[i]$length))
+#   overlap.to.idx <- overlap.to.idx[keep.length.idx]
+#   
+#   # find the longest of all 'isoforms' and delete the rest
+#   delete.idx <- sort(Tx_with_active_prom[overlap.to.idx]$length, 
+#                      decreasing = T, index.return  = T)$ix[-1]
+#   delete.idx <- overlap.to.idx[delete.idx]
+#   
+#   Tx_with_active_prom <- Tx_with_active_prom[-delete.idx]
+# }  # <- write function -DONE
 
-Installation/Loading of ComplexHeatMap depends on pkg Cairo, which requires Xquartz.
-Xquartz was installed with homebrew to fix this:
-`brew install --cask xquartz`
+# lapply(seq_along(prom_sub), function(x) findOverlaps(resize(prom_sub[x], width=100, fix = "start"), prom_sub))
 
-See SOF issue [here](https://stackoverflow.com/questions/38952427/include-cairo-r-on-a-mac)
+gg6_txdb <- loadDb(here("txdb", "TxDb.galGal6.ncbiRefseq.sqlite"))
+gg6_txdb <- getStandardChrom(gg6_txdb, ref = "galGal6")
 
-Initially i wanted to show the relationship between 3 atac peak sets (i.e. all, distal, enhancers) with ComplexHeatmap::UpSet, but it looks like it shows the intersection as the length of ranges in bp(?), and not where each range is one item in the set. Left this out for now. 
-```{r Deprecated, eval=FALSE, message=FALSE, results='hide', warning=FALSE}
-
-latac <- GRangesList(atac=atac_g, distal=atac_distal, enhancers=enhancers)
-latac <- make_comb_mat(latac, mode = 'intersect')
-
-UpSet(latac)
-
-### Test viz using ChIPeakanno
+Tx <- GenomicFeatures::transcripts(gg6_txdb)
+  Tx <- Tx[which(seqnames(Tx) == "chr4")]
+  Tx <- Tx[!duplicated(start(Tx))]
 
 
-###-----TEST--move to dump/notes later----###
+prom_state <- import.bed(here("segmentation", "HH22h", "HH22h_4-states_st_1.bed"))
+prom_state <- prom_state[which(seqnames(prom_state) == "chr4")]
+
+# take overlap of TSS with prom-like state
+
+Tx_with_active_prom <- Tx[findOverlaps(resize(Tx, width = 1, fix = "start"), prom_state, maxgap = 0)@from]
+
+##--- Get unique &(longest) isoform of each Tx for counting
+
+# get length in kb
+Tx_with_active_prom$length <- width(Tx_with_active_prom)/1e3
+
+# filter by length and overlap with other isoform
+Tx_with_active_prom_filt <- getUniqueTx(Tx_with_active_prom)
+
+# test_tx <- Tx_with_active_prom[1:20]
+
+# i <-  0
+# while (length(test_tx) > i + 1) {
+#   
+#   i <-  i + 1
+#   print(paste0('start iteration #', i))
+#   overlap.to.idx <- findOverlaps(resize(test_tx[i], width = 100, fix = "start"),
+#                                  test_tx)@to
+#   print(overlap.to.idx)
+#   
+#   if (length(overlap.to.idx) == 1) next
+#   
+#   # keep only those with ~same length
+#   keep.length.idx <- which(ceiling(test_tx[overlap.to.idx]$length) == ceiling(test_tx[i]$length))
+#   print(keep.length.idx)
+#   overlap.to.idx <- overlap.to.idx[keep.length.idx]
+#   print(overlap.to.idx)
+#   
+#   # find the longest of all 'isoforms' and delete the rest if there is more than 1
+#   delete.idx <- sort(test_tx[overlap.to.idx]$length, 
+#                      decreasing = T, index.return  = T)$ix
+#   if (length(delete.idx) == 1) 
+#     delete.idx <- delete.idx
+#   else delete.idx <- delete.idx[-1]
+#   print(delete.idx)
+#   delete.idx <- overlap.to.idx[delete.idx]
+#   print(delete.idx)
+#   test_tx <- test_tx[-delete.idx]
+#   
+#   print(paste0('length of gr:', length(test_tx)))
+#   print(paste0('end iteration #', i))
+# }
+
+prom_no_refseq <- prom_state[!overlapsAny(prom_state, resize(Tx, width = 1, fix = "start"))]
+
+# load atac peaks
+atac <- import.bed(here("input_data", "ATAC", "atac-HH22h_peaks.bed"))
+  atac <- atac[which(seqnames(atac) == "chr4")]
+
+  # get atac as possible promoters
+atac_prom <- atac[overlapsAny(atac, prom_no_refseq)]
 
 
-tss_test <- toGRanges(here("txdb", "galGal6_promoter_regions.bed"))
+count.TPM <- unname(tx2_prom$count.TPM[,1])
+count.raw <- unname(tx2_prom$count[,1])
+counts_all <- c(count.raw, count.TPM)
+
+grp <- c(rep("raw_counts", length(tx2_prom)), rep("TPM", length(tx2_prom)))
+counts_df <- tibble(grp, counts_all)
+
+counts_df %>% ggplot(aes(x=factor(grp), y=counts_all, fill = factor(grp))) + 
+  geom_violin() +
+  ylim(c(10,20000))
 
 
-ol_enh <- findOverlapsOfPeaks(atac_g, crup_g, unique_tss)
-
-makeVennDiagram(list(atac_g, crup_g, unique_tss), by = "region", connectedPeaks = "keepAll")
-
-## Error in FUN(X[[i]], ...) : Inputs contains duplicated ranges.  please recheck your inputs.
-## Even though any(duplicated(unique_tss)) == FALSE
 
 
-            
 ```
+ 
 
-> length(overlapsAny(atac_g, unique_tss))
-[1] 53658
 
-> length(findOverlaps(atac_g, unique_tss))
-[1] 28159
 
-> length(subsetByOverlaps(atac_g, unique_tss))
-[1] 13302
-
-> length(subsetByOverlaps(atac_g, unique_tss, invert = TRUE))
-[1] 40356

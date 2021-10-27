@@ -192,6 +192,23 @@ enh_stats %>%
 
 3. Plots for norm signals over called ENH/PROM
 
+```{r bamProfile over EP}
+load(here("RData", "EP_bamProfile_10bin_df.RData"))
+### PROM centered by TSS, ENH centered by ATAC pk ranges
+
+ep_colors <- c("#3D6588", "#368B86")
+
+psigs <- sigs.df %>% group_by(sp, bam) %>% 
+  mutate(sigxx = round(scales::rescale(sig, to = c(0,1)), digits = 3)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = bp, y = sigxx, color = fct_rev(cre))) +
+    geom_jitter(size = 3) + 
+    facet_grid(factor(sp) ~ factor(bam)) +
+    scale_color_manual(values = ep_colors)
+
+
+
+```
 
 
 
