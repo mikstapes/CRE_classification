@@ -7,8 +7,8 @@ fig_crop: no
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
-             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+knitr::opts_chunk$set(dpi = 300,
+             warning=FALSE, message=FALSE, error= FALSE)
 pdf.options(useDingbats = FALSE)
 
 ```
@@ -18,8 +18,8 @@ pdf.options(useDingbats = FALSE)
 bioc_pkg <- c("rtracklayer", "bamsignals")
 cran_pkg <- c("here", "tidyverse", "RColorBrewer", "viridisLite")
 
-suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
-suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
+# load multiple packages, quitely https://stackoverflow.com/a/55737805 
+invisible(suppressMessages(lapply(c(bioc_pkg,cran_pkg), library, character.only = TRUE)))
 
 source(here("R", "functions.R"))
 ```
@@ -40,8 +40,6 @@ barplot_theme <- plot_theme  +
         text = element_text(size = 15),
         axis.title = element_blank(),
         legend.position = "none", 
-        axis.text.y = element_text(size = 15, face = "bold"),
-        axis.text.x = element_text(size = 13),
         axis.ticks.y = element_blank(), 
         axis.line.x = element_line(size = 0.2),
         panel.border = element_blank())
@@ -72,7 +70,7 @@ boxplot_theme <- plot_theme  +
 
 strip_theme <- theme(strip.background = element_blank(),
                     strip.switch.pad.wrap = unit(1, "lines"), 
-                    strip.text = element_text(size = 30, face = "bold.italic"))
+                    strip.text = element_text(size = 20, face = "bold"))
 
 ## Colors scheme for ENH class
 ENH_colors_light <- c("#fed439ff", "#709AE1", "#97a7b3")
@@ -274,18 +272,18 @@ save(mENH_proj_gr, gENH_proj_gr, file = here("RData", "IPP_Granges-0921.RData"))
 ```{r IPP plot: SC only, out.width="200%", fig.height = 7, fig.align='center'}
 
 # plot SC conserved as direct score of >= 0.99
-sc_count <- c(1266, 11931, 2046, 11558)
+sc_count <- c(1983, 11214, 1624, 11980)
 sc_class <- c("Sequence-Conserved","Non-Conserved",
               "Sequence-Conserved","Non-Conserved")
-sc_spc <- c(rep("E10.5 ENH", 2), rep("HH22 ENH", 2))
+sc_spc <- c(rep("Mouse Enhancers", 2), rep("Chicken Enhancers", 2))
 
 sc_df <- tibble(sc_spc, sc_class, sc_count)
 
 
-  sc_df %>% 
+  scp <- sc_df %>% 
     ggplot(aes(fill=factor(sc_class), 
                y=sc_count, 
-               x=fct_rev(sc_spc))) +
+               x=sc_spc)) +
     geom_bar(stat = "identity", 
              color="#666666", position = position_fill(vjust = 0.5)) +
     scale_y_continuous(expand = c(0, 0)) +
@@ -293,10 +291,11 @@ sc_df <- tibble(sc_spc, sc_class, sc_count)
     coord_flip() +
     geom_text(stat="identity", 
           aes(label=sc_count), 
-          position = position_fill(vjust = 0.5), size = 7) +
-    stacked.barplot_theme +
-    theme(aspect.ratio = 0.65,
-          legend.text = element_text(size = 18))
+          position = position_fill(vjust = 0.5), size = 8) +
+    barplot_theme +
+    theme(plot.margin = margin(1,3,1,1, unit = "lines"),
+          legend.text = element_text(size = 18),
+          axis.text = element_text(size = 30)) 
 
 ```
 
@@ -330,6 +329,13 @@ ENH_stats1 %>%
     coord_flip() +
     stacked.barplot_theme +
     theme(aspect.ratio = 0.65)
+
+
+#### Institute Seminar ####
+
+load(here("RData", "LiftOver_IPP_d3000_gr.RData"))
+
+
 
 ```
 
@@ -498,6 +504,7 @@ tidy_count <- map_dfr(names(count_wide), function(x){
 
 ```{r counts viz}
 
+## PR3
 load(here("RData", "bamcounts_d3000_df.RData"))
 tidy_count <- tidy_count %>% group_by(sp, histone) %>% 
   mutate(sigx = round(scales::rescale(sig, to = c(0,1)), digits = 3)) %>% ungroup()
@@ -518,5 +525,55 @@ p.counts <- tidy_count %>%
         legend.text = element_text(size = 15)) 
 
 
+## MPI-IS ##
+
+load(here("RData", "bamcounts_d3000_df_nov21.RData"))
+tidy_count <- tidy_count %>% group_by(sp, histone) %>% 
+  mutate(sigx = round(scales::rescale(sig, to = c(0,1)), digits = 3)) %>% 
+  ungroup() %>% 
+  mutate(enh_class = case_when(gr == "SCa" ~ "Seq. conserved, accessible",
+                               gr == "PCa" ~ "Proj. conserved, accessible",
+                               gr == "SCi" ~ "Seq. conserved, inaccessible",
+                               gr == "PCi" ~ "Proj. conserved, inaccessible",
+                               gr == "NC" ~ "Non-conserved"))
+
+tidy_count$enh_class <- fct_relevel(tidy_count$enh_class, 
+                                    c("Seq. conserved, accessible",
+                                    "Proj. conserved, accessible",
+                                    "Seq. conserved, inaccessible",
+                                    "Proj. conserved, inaccessible",
+                                    "Non-conserved"))
+
+tidy_count$histone <- fct_relevel(tidy_count$histone, 
+                                    c("ATAC",
+                                    "H3K27AC",
+                                    "H3K4ME1",
+                                    "H3K4ME3",
+                                    "H3K27ME3"))
+
+ENH_colors <- c("#fed439ff","#709AE1","#c2ac3d","#c0d2f2", "#97a7b3")
+
+p.counts <- tidy_count %>% 
+  ggplot(aes(x = enh_class, y = sigx, fill = enh_class)) +
+  geom_boxplot() +
+  facet_grid(factor(histone) ~ fct_rev(sp)) +
+  scale_y_log10(name = "Normalized read count", n.breaks = 3)+
+  xlab("") +
+  scale_fill_manual(values=ENH_colors) + 
+  boxplot_theme + strip_theme +
+  theme(panel.spacing = unit(1, "lines"), 
+        plot.margin = margin(1,1,1,1, unit = "lines"),
+        panel.border = element_rect(size = 0.5, fill = NA), 
+        legend.position = "left", 
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 20), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) 
+
+pdf(here("plots", "IPP", "bamprofile_d3000.pdf"))
+p.counts
+dev.off()
+
 ```
+
 

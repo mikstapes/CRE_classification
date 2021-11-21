@@ -9,17 +9,13 @@ output: html_document
 knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
              warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
 pdf.options(useDingbats = FALSE)
-
-library(here)
-source(here("R", "functions.R"))
 ```
 
 ```{r load libs, results='hide'}
-bioc_pkg <- c("GenomicFeatures", "rtracklayer", "TxDb.Mmusculus.UCSC.mm10.knownGene", "bamsignals")
+bioc_pkg <- c("GenomicFeatures", "rtracklayer", "bamsignals")
 cran_pkg <- c("here", "tidyverse", "RColorBrewer", "viridisLite")
 
-suppressMessages(lapply(bioc_pkg, library, character.only = TRUE)) 
-suppressMessages(lapply(cran_pkg, library, character.only = TRUE))
+invisible(suppressMessages(lapply(c(bioc_pkg,cran_pkg), library, character.only = TRUE)))
 
 source(here("R", "functions.R"))
 ```
@@ -101,6 +97,7 @@ ii\. In-house data: adaptor sequences from PE100 fastq were first removed using 
 
 -   ATAC peaks were called using [Genrich](https://github.com/jsh58/Genrich) from name sorted BAM files. Reads were extended from the 5' cut sites to 100bp before pileups and peak-calling. Replicates and/or blacklisted regions were included if available. See genrich_call.sh on MP_all/ATAC
 
+
 ## 2. Promoter calling
 
 Core promoter is the minimal region including the TSS and can extend up to \~45bp up & downtream of the TSS for \~100bp in size. The core & 'proximal' promoter region is combined and set to be the region 1kb upstream and 200bp downstream of **an annotated TSS**.
@@ -158,9 +155,10 @@ v.  Get library size and calculate CPM and average CPM values from raw counts, k
     1.  Because ATAC peaks can sometimes be rather broad, that is, much wider than what one could expect from a promoter regions I resize them to have the same width as annotated prom regions (i.e. 1.2kb), fixed by the original center. I then sort all promoter-like ATAC peaks by their avg.CPM values. For each peaks, nearby peaks which are overlapping or at most a promoter-width distance are discarded if they have lower avg.CPM values. This allows me to avoid having multiple 1.2kb promoter regions, especially in busy genomic regions with broad marks and accessibility.
     
 
+
 ## 3. Enhancer calling
 
-
+### 3b. Poised enhancers
 
 ## 4. Quality-control
 
@@ -337,4 +335,132 @@ ggplot(sigs.df, aes(bp, sigs_scaled, color = gr)) + geom_point()
 
 
 ```
+
+
+# Downstream analysis
+
+## 1. IPP
+
+See IPP_parameterization.Rmd
+
+## 2. Motifs analysis
+Here I want to try 2 popular ways to analyze motifs, with the MEME-suite (now ported to R as a pkg), and HOMER.
+
+Tasks: 
+- Scan for motifs in called active enhancers
+- Get motifs enrichment of conserved/orthologous ENH over non-conserved
+
+1. HOMER is a collection of perl scripts developed and maintained by UCSD for common bioinformatic tasks. Details re: config [here](http://homer.ucsd.edu/homer/introduction/configure.html). For now ran as individual shell scripts, but should be incorporated inside a Snakemake workflow. 
+
+2. MEME has 2 specific tools for the required tasks: scanning with FIMO, and testing for enrichment with AME.
+
+3. For both tools, an input of background sequences is/should be needed for enrichment. One way to generate such background is by taking the sequences of, i.e. enhancers, and shuffle them around while still keeping individual dinucleotide frequency. This is built into MEME (kmer = 2). 
+
+
+```{r Motifs analysis}
+
+# Installing packages
+
+BiocManager::install(c("universalmotif", "memes"))
+
+library(memes)  ##requires R 4.1 (fml)
+library(universalmotif)
+library(MotifDb)
+library(BSgenome.Ggallus.UCSC.galGal6)
+library(plyranges)
+
+# Import a test set of peak
+
+h22.atac <- getStandardChrom(import(here("input_data", "ATAC", "atac-HH22h_pks.narrowPeak"),
+                                    format = "narrowPeak"), 
+                             ref = "galGal6")
+
+  h22.atac_chr13 <- h22.atac[which(seqnames(h22.atac) == "chr13")]
+
+# Import called ENH
+
+h22.enh <- import.bed(here("enhancer_sets","chicken", "HH22h_ENH_filt_from_atac.bed"))
+  h22.enh <- h22.atac_chr13[overlapsAny(h22.atac_chr13, h22.enh)]
+
+rm(h22.atac, h22.atac_chr13)
+  
+# Readjust ENH to center by peak summit, and make a 1000bp window
+  
+h22.enh_summit <- GRanges(seqnames = seqnames(h22.enh),
+                        ranges = IRanges(start = start(h22.enh) + h22.enh$peak-1,
+                                         width = 1),
+                        strand = strand(h22.enh), 
+                        name = h22.enh$name,
+                        pVal = h22.enh$pValue)  
+
+h22.enh_summit <- resize(h22.enh_summit, width = 500, fix = "center")
+
+## get sequences from genome, either a BSgenome pkg, or from a fasta file
+
+gg6 <- BSgenome.Ggallus.UCSC.galGal6::BSgenome.Ggallus.UCSC.galGal6
+h22.enh_seq <- get_sequence(regions = h22.enh_summit, genome = gg6)
+
+## get 0-order bkground 
+# https://www.biostars.org/p/74786/
+
+universalmotif::get_bkg(h22.enh_seq, k = 1, to.meme = here("input_data", "test_bkg_k1"))
+
+## load motifs
+
+hcmc_motifs <- query(MotifDb, "HOCOMOCOv10") %>% 
+  universalmotif::convert_motifs()
+
+## fimo test
+
+fimo_gchr13 <- runFimo(h22.enh_seq, hcmc_motifs, 
+                       bfile=here("input_data", "test_bkg_k1"), 
+                       skip_matched_sequence = T)
+
+
+## incorporate pk info
+
+fimo_gchr13_pk <- plyranges::join_overlap_inner(fimo_gchr13, h22.enh_summit)
+
+### Filter by GO relating to heart dev
+
+library(biomaRt)
+
+## get human gene symbols to match motifs ID (i.e. all caps)
+
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+heartdev_GOs <- c("GO:0007507", "GO:0003007", "GO:0003207", "GO:0001947")
+
+heartdev_genes <- getBM(attributes = c("hgnc_symbol", "entrezgene_id"),
+                        filters = c("go", "with_go"), 
+                        values = list(heartdev_GOs, TRUE), 
+                        mart = mart)
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

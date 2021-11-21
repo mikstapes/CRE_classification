@@ -1,0 +1,272 @@
+---
+title: "Enhancer conservation classification"
+author: "Mai Phan (phan@molgen.mpg.de)"
+date: "11/9/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(dpi = 300,
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+
+libs <- c("here", "tidyverse", "rtracklayer", "plyranges")
+invisible(suppressMessages(lapply(c(libs), library, character.only = TRUE)))
+
+source(here("R", "functions.R"))
+
+ENH_colors <- c("#fed439ff","#709AE1","#dacd8b","#c0d2f2", "#97a7b3")
+```
+
+
+```{r}
+barplot_theme <- plot_theme  + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.ticks.length = unit(0.25, "cm"),
+        text = element_text(size = 15),
+        axis.title = element_blank(),
+        legend.position = "none", 
+        axis.ticks.y = element_blank(), 
+        panel.border = element_blank())
+```
+
+
+# Get sequence conserved ENHancers
+LiftOver, 10% bases can be remapped
+
+```{r ref data}
+
+#####--- load in called ATAC peaks ---#####
+
+mATAC <- import.bed(here("input_data", "ATAC", "atac-e105h_peaks.bed"))
+  mATAC <- getStandardChrom(mATAC, ref = "mm10")
+  
+gATAC <- import.bed(here("input_data", "ATAC", "atac-HH22h_peaks.bed"))
+  gATAC <- getStandardChrom(gATAC, ref = "galGal6")
+
+
+```
+
+
+```{r LiftOver}
+
+# Load liftover output as gr
+
+mENH_lifted <- import.bed(here("enhancer_sets", "e105h", "e105h_ENH_filt_from_atac_Lifted.bed"))
+  mENH_lifted_pks <- unique(mENH_lifted$name)
+  
+
+gENH_lifted <- import.bed(here("enhancer_sets", "HH22h", "HH22h_ENH_filt_from_atac_Lifted.bed"))
+  gENH_lifted_pks <- unique(gENH_lifted$name)
+  
+
+# get distance to nearest ATAC pk and apply cut-off
+  
+mENH_lifted$gr <- ifelse(overlapsAny(mENH_lifted, gATAC, maxgap = 500L),
+                         "accessible", "inaccessible")
+
+gENH_lifted$gr <- ifelse(overlapsAny(gENH_lifted, mATAC, maxgap = 1000L),
+                         "accessible", "inaccessible")
+
+# gENH_lifted[overlapsAny(gENH_lifted, mATAC, maxgap = 1000)]
+# mcols(distanceToNearest(gENH_lifted[overlapsAny(gENH_lifted, mATAC, maxgap = 1000)], mATAC))$distance
+# test_chr17_g2m <- gENH_lifted[overlapsAny(gENH_lifted, mATAC, maxgap = 1000)][which(seqnames(gENH_lifted[overlapsAny(gENH_lifted, mATAC, maxgap = 1000)]) == "chr17")]
+# 
+# export.bed(test_chr17_g2m, here("test", "test_chr17_g2m_SC_1kb.bed"))
+```
+
+# Load IPP output (d50 = 30kb)
+
+```{r IPP}
+#####--- Load CRUP projs ---#####
+
+gENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "chicken", "HH22h_ENH_filt_from_atac.proj")) %>% 
+  filter(!name %in% gENH_lifted_pks)
+
+
+mENH_ipp_df <- loadTidyIPP(here("enhancer_sets", "mouse", "e105h_ENH_filt_from_atac.proj")) %>% 
+  filter(!name %in% mENH_lifted_pks)
+
+
+#####--- Set threshold ---#####
+
+d50 <- 30000 #preset distance half-life
+dmax.bp <- 3000
+dmax.score <- getIPPThreshold(dmax.bp, dh = d50)
+
+# dmax.bp <- c(500, 3000) 
+#     dmax.score <- purrr::map_dbl(dmax.bp, getIPPThreshold, dh = d50) # calculate threshold from set max distance(s)
+# 
+# dmax_dir <- dmax.score[1] #set max distance for direct projection ~1kb
+
+
+#####--------- Get proj w cut off as GRanges --------- #####  
+
+##- Get projected df based on thresholding
+
+##### Apply cut-off and convert to GRanges ####
+
+gENH_proj_df <- getProjCoordAsDF_new(gENH_ipp_df, dmax.score) %>% 
+  distinct(name, .keep_all = TRUE)
+
+# get distance to nearest ATAC pk and apply cut-off
+gENH.PC_GR <- IPPtoGRanges(filter(gENH_proj_df, gr == "PC"), target_genome = "mm10")
+
+gENH.PC_GR$distance <- mcols(distanceToNearest(gENH.PC_GR, mATAC))$distance
+gENH.PC_GR$distance_gr <- ifelse(round(gENH.PC_GR$distance) <= 2000L, 
+                                 "accessible", 
+                                 "inacessible")
+
+gENH_proj.GR <- GRangesList("SCa" = gENH_lifted[which(gENH_lifted$gr == "accessible")],
+                            "SCi" = gENH_lifted[which(gENH_lifted$gr == "inaccessible")],
+                            "PCa" = gENH.PC_GR[which(gENH.PC_GR$distance_gr == "accessible")],
+                            "PCi" = gENH.PC_GR[which(gENH.PC_GR$distance_gr == "inacessible")],
+                            "NC" = IPPtoGRanges(filter(gENH_proj_df, gr == "NC"), target_genome = "mm10"))
+
+
+
+
+##### mouse ####
+
+mENH_proj_df <- getProjCoordAsDF_new(mENH_ipp_df, dmax.score) %>% 
+  distinct(name, .keep_all = TRUE)
+
+mENH.PC_GR <- IPPtoGRanges(filter(mENH_proj_df, gr == "PC"), target_genome = "galGal6")
+
+# get distance to nearest ATAC pk and apply cut-off
+
+mENH.PC_GR$distance <- mcols(distanceToNearest(mENH.PC_GR, gATAC))$distance
+mENH.PC_GR$distance_gr <- ifelse(round(mENH.PC_GR$distance) <= 1000L, 
+                                 "accessible", 
+                                 "inaccessible")
+
+mENH_proj.GR <- GRangesList("SCa" = mENH_lifted[which(mENH_lifted$gr == "accessible")],
+                            "SCi" = mENH_lifted[which(mENH_lifted$gr == "inaccessible")],
+                            "PCa" = mENH.PC_GR[which(mENH.PC_GR$distance_gr == "accessible")],
+                            "PCi" = mENH.PC_GR[which(mENH.PC_GR$distance_gr == "inaccessible")],
+                            "NC" = IPPtoGRanges(filter(mENH_proj_df, gr == "NC"), target_genome = "galGal6"))
+
+
+save(gENH_proj.GR, mENH_proj.GR, file = here("RData", "LiftOver_IPP_d3000_gr.RData"))
+```
+
+
+```{r center proj by ATAC pk for funnel plot}
+
+### m2g proj, centered by gATAC
+
+gATAC[findOverlaps(mENH_proj.GR[["SC.a"]], gATAC, maxgap = 1000L, select = "first")] %>% 
+    export.bed(here("enhancer_sets", "e105h", "e105h_enh_atac_SC_galGal6.bed"))
+
+gATAC[findOverlaps(mENH_proj.GR[["PC.a"]], gATAC, maxgap = 1000L, select = "first")] %>% 
+  export.bed(here("enhancer_sets", "e105h", "e105h_enh_atac_PC_galGal6.bed")) 
+
+c(mENH_proj.GR[["PC.i"]], mENH_proj.GR[["NC"]]) %>% 
+  export.bed(here("enhancer_sets", "e105h", "e105h_enh_atac_NC_galGal6.bed")) 
+
+### g2m proj, centered by mATAC
+
+mATAC[findOverlaps(gENH_proj.GR[["SC.a"]], mATAC, maxgap = 2000L, select = "first")] %>%
+  export.bed(here("enhancer_sets", "HH22h", "HH22h_enh_atac_SC_mm10.bed"))
+
+mATAC[findOverlaps(gENH_proj.GR[["PC.a"]], mATAC, maxgap = 2000L, select = "first")] %>% 
+  export.bed(here("enhancer_sets", "HH22h", "HH22h_enh_atac_PC_mm10.bed"))
+
+c(gENH_proj.GR[["PC.i"]], gENH_proj.GR[["NC"]]) %>% 
+  export.bed(here("enhancer_sets", "HH22h", "HH22h_enh_atac_NC_mm10.bed"))
+
+```
+
+```{r Color-code BED}
+
+# import ENH as tsv 
+mENH <- read_tsv(here("enhancer_sets", "e105h", "e105h_ENH_filt_from_atac.bed"), col_names = F)
+
+mENH_bed <- mENH %>% 
+  mutate(tsrt=X2, tend=X3,
+         rgb = case_when(X4 %in% mENH_proj.GR[["SC.a"]]$name ~ "254,212,57",
+                         X4 %in% mENH_proj.GR[["SC.i"]]$name ~ "238,214,119",
+                         X4 %in% mENH_proj.GR[["PC.a"]]$name ~ "112,154,225",
+                         X4 %in% mENH_proj.GR[["PC.i"]]$name ~ "192,210,242", 
+                         TRUE ~ "151,167,179"))
+mENH_bed %>% 
+  write_tsv(here("enhancer_sets", "e105h", "e105h_ENH_mm10_rgb.bed"), col_names = FALSE)
+
+gENH <- read_tsv(here("enhancer_sets", "HH22h", "HH22h_ENH_filt_from_atac.bed"), col_names = F)
+
+gENH_bed <- gENH %>% 
+  mutate(tsrt=X2, tend=X3,
+         rgb = case_when(X4 %in% gENH_proj.GR[["SC.a"]]$name ~ "254,212,57",
+                         X4 %in% gENH_proj.GR[["SC.i"]]$name ~ "238,214,119",
+                         X4 %in% gENH_proj.GR[["PC.a"]]$name ~ "112,154,225",
+                         X4 %in% gENH_proj.GR[["PC.i"]]$name ~ "192,210,242", 
+                         TRUE ~ "151,167,179"))
+
+gENH_bed %>% 
+  write_tsv(here("enhancer_sets", "HH22h", "HH22h_ENH_galGal6_rgb.bed"), col_names = FALSE)
+
+
+```
+
+```{r}
+
+load(here("RData", "LiftOver_IPP_d3000_gr.RData"))
+mENH <- read_tsv(here("enhancer_sets", "e105h", "e105h_ENH_filt_from_atac.bed"), col_names = F)
+gENH <- read_tsv(here("enhancer_sets", "HH22h", "HH22h_ENH_filt_from_atac.bed"), col_names = F)
+
+mENH_tibble <- mENH %>% 
+  mutate(enh_class = case_when(X4 %in% mENH_proj.GR[["SCa"]]$name ~ "SC_a",
+                              X4 %in% mENH_proj.GR[["SCi"]]$name ~ "SC_i",
+                              X4 %in% mENH_proj.GR[["PCa"]]$name ~ "PC_a",
+                              X4 %in% mENH_proj.GR[["PCi"]]$name ~ "PC_i", 
+                              TRUE ~ "NC")) %>% 
+  group_by(enh_class)  %>% 
+  tally() %>% 
+  mutate(sp="mouse")
+
+
+gENH_tibble <- gENH %>% 
+  mutate(enh_class = case_when(X4 %in% gENH_proj.GR[["SCa"]]$name ~ "SC_a",
+                              X4 %in% gENH_proj.GR[["SCi"]]$name ~ "SC_i",
+                              X4 %in% gENH_proj.GR[["PCa"]]$name ~ "PC_a",
+                              X4 %in% gENH_proj.GR[["PCi"]]$name ~ "PC_i", 
+                              TRUE ~ "NC")) %>% 
+  group_by(enh_class) %>% 
+  tally() %>% 
+  mutate(sp="chicken")
+
+enh_stats_df <- rbind(mENH_tibble, gENH_tibble)
+enh_stats_df$enh_class <- factor(enh_stats_df$enh_class, 
+                                 levels = c("SC_a", "PC_a", "SC_i", "PC_i", "NC"))
+
+
+barp2 <- enh_stats_df %>% 
+    ggplot(aes(fill=fct_rev(enh_class), 
+               y=n, 
+               x=sp)) +
+    geom_bar(stat = "identity", 
+             color="#666666", position = "dodge") +
+    geom_text(stat="identity", 
+              aes(label=n), 
+              position = position_dodge(width = 0.9), hjust = -0.25, size = 10) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0,8000)) +
+    scale_fill_manual(values = ENH_colors[5:1]) +
+    coord_flip() +
+    barplot_theme + 
+    theme(plot.margin = margin(1,5,1,1, unit = "lines"),
+          axis.text = element_text(size = 30, face = "bold"),
+          axis.text.y = element_text(size = 40),
+          axis.text.x = element_text(size = 45),
+          axis.line = element_line(size = 0.5))
+
+
+
+
+
+```
+
+
+
+
+
+

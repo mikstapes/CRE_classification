@@ -48,14 +48,15 @@ mGR  <- lapply(c(mPROM.path, mENH.path),
                loadFixedRanges,
                ref.genome = "mm10", 
                win.size = 1000)
-
+names(mGR)  <- c("prom", "enh")
 gGR  <- lapply(c(gPROM.path, gENH.path), 
                loadFixedRanges,
                ref.genome = "galGal6", 
                win.size = 1000)
+names(gGR)  <- c("prom", "enh")
 
 
-### get counts
+#####------ Count Function ------#####
 
 
 get_bamProfile <- function(bam, bam.list, gr, target_genome) {
@@ -69,35 +70,72 @@ get_bamProfile <- function(bam, bam.list, gr, target_genome) {
   if (target_genome == "mm10") { #SE BAM
     sigs <- sapply(bamProfile(bampath = bam,
     gr = gr,
-    shift = 100,
+    shift = 100, binsize = 10,
     mapqual = 10, filteredFlag = 1024, ss = F, verbose =F)@signals,
     function(x) x)
     } else { #PE BAM
     sigs <- sapply(bamProfile(bampath = bam,
-    gr = gr,
-    paired.end = "midpoint",
+    gr = gr, 
+    paired.end = "midpoint", binsize = 10,
     mapqual = 10, filteredFlag = 1024, ss = F, verbose = F)@signals,
     function(x) x)
     }
     return(sigs)
   }
 
-mCount  <- lapply(mBAM, function(x){
-	r  <- mclapply(mGR, 
-		       get_bamProfile, 
-		       bam = x, bam.list = mBAM, target_genome = "mm10", 
-		       mc.cores = 6)
+#####------ Get Counts as nested Lists ------#####
+
+mSigs  <- lapply(mBAM, function(x){
+    mclapply(mGR,
+             get_bamProfile,
+             bam = x, bam.list = mBAM, target_genome = "mm10",
+             mc.cores = 6)
     })
 
+names(mSigs)  <- c("ATAC", "H3K27AC", "H3K27ME3", "H3K4ME1", "H3K4ME3") 
 
-gCount  <- lapply(gBAM, function(x){
+gSigs  <- lapply(gBAM, function(x){
     mclapply(gGR,
              get_bamProfile,
              bam = x, bam.list = gBAM, target_genome = "galGal6",
              mc.cores = 6)
     })
 
+names(gSigs)  <- c("ATAC", "H3K27AC", "H3K27ME3", "H3K4ME1", "H3K4ME3")
 
-save(mCount, gCount, file = here("data", "RData", "enh_prom_epi_counts_1kb_win.RData"))
+save(mSigs, gSigs, file = here("data", "RData", "EP_bamProfile_10bin.RData"))
 
 
+load(here("data", "RData", "EP_bamProfile_10bin.RData"))
+
+mSigs.wide <- unlist(mSigs, recursive = F)
+
+mSigs.df <- map_dfr(names(mSigs.wide), function(x){
+  tibble(sig = rowMeans(mSigs.wide[[x]]), 
+         col=rep(x, nrow(mSigs.wide[[x]])),
+         bp = c(seq(-1000, -10, by = 10), seq(10, 1000, by = 10))) %>% 
+    separate(col, into = c("bam", "cre")) %>% 
+    group_by(bam) %>% 
+    mutate(sigx = round(scales::rescale(sig, to = c(0,1)), digits = 3)) %>% 
+    ungroup()
+})
+
+mSigs.df  <- mutate(mSigs.df, sp = "mouse")
+
+gSigs.wide <- unlist(gSigs, recursive = F)
+
+gSigs.df <- map_dfr(names(gSigs.wide), function(x){
+  tibble(sig = rowMeans(gSigs.wide[[x]]), 
+         col=rep(x, nrow(gSigs.wide[[x]])),
+         bp = c(seq(-1000, -10, by = 10), seq(10, 1000, by = 10))) %>% 
+    separate(col, into = c("bam", "cre")) %>% 
+    group_by(bam) %>% 
+    mutate(sigx = round(scales::rescale(sig, to = c(0,1)), digits = 3)) %>% 
+    ungroup()
+})
+
+gSigs.df  <- mutate(gSigs.df, sp = "chicken")
+
+sigs.df <- rbind(mSigs.df, gSigs.df)
+
+save(sigs.df, file = here("data", "RData","EP_bamProfile_10bin_df.RData"))
