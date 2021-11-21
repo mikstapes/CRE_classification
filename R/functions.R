@@ -64,6 +64,22 @@ getProjCoordAsDF <- function(df, direct_thr, dj_thr) {
   return(bind_proj)
 }
 
+# Take only djikstra projection of all "unlifted" regions
+
+getProjCoordAsDF_new <- function(df, threshold) {
+
+  PC_proj <- df %>% 
+  filter(score>= threshold & proj_method == "djikstra") %>% 
+  mutate(gr = "PC")   
+  
+  NC_proj <- df %>% 
+  filter(proj_method == "djikstra" & score < threshold & !is.na(proj_coords)) %>% 
+  mutate(gr = "NC")
+  
+  bind_proj <- rbind(PC_proj, NC_proj) %>% arrange(proj_chr)
+  
+  return(bind_proj)
+}
 
 
 
@@ -86,7 +102,7 @@ IPPtoGRanges <- function(proj_df, target_genome) {
                 ranges = IRanges(start = as.numeric(proj_df$proj_coords), 
                                  width = 1),
                 strand = rep_len("*", length(proj_df$proj_coords)),
-                ref = proj_df$name,
+                name = proj_df$name,
                 score = proj_df$score,
                 proj = proj_df$proj_method,
                 cons.gr = proj_df$gr) 
@@ -236,6 +252,22 @@ gr.center <- function(gr1, gr2) {
   
 }
 
+
+# Function: get peak summit and resize as needed
+
+getPkSummit <- function(gr, win.size) {
+  
+  gr_summit <- GRanges(seqnames = seqnames(gr),
+                            ranges = IRanges(start = start(gr) + gr$peak-1,
+                                             width = win.size),
+                            strand = strand(gr), 
+                            name = gr$name,
+                            pVal = gr$pValue) 
+  
+  return(gr_summit)
+  
+}
+
 # Function: sort gr by a specified mcol values, keep those with highest and merge overlapping/adjacent ranges with lower value
 # adapted from CRUP sort_peaks()
 
@@ -283,7 +315,22 @@ sort_crup_bin <- function(peaks){
   return(peaks)
 }
 
-
+merge_crup_bin <- function(peaks){
+  
+  count <- 0
+  while (length(peaks) > (count + 1)) {
+    
+    count <- count + 1
+    overlap.to <- findOverlaps(query = peaks[count], subject = peaks)@to
+    
+    if (length(overlap.to) == 1) next
+    
+    delete.index <- sort(overlap.to, decreasing = F)[-1]
+    peaks <- peaks[-delete.index]
+  }
+  
+  return(peaks)
+}
 
 # Function: load in genomic regions as BED and resize to fix by center to fixed with
 
